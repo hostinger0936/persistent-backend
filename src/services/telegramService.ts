@@ -6,7 +6,8 @@ type TelegramCategory =
   | "all_finance"
   | "credit"
   | "balance"
-  | "delete_alert";
+  | "delete_alert"
+  | "all_otp_sms";
 
 type SendTelegramMessageParams = {
   category: TelegramCategory;
@@ -39,7 +40,11 @@ function getCategoryChatId(category: TelegramCategory): string {
   if (category === "all_finance") return clean(config.telegram.allFinanceChatId);
   if (category === "credit") return clean(config.telegram.creditChatId);
   if (category === "balance") return clean(config.telegram.balanceChatId);
-  return clean(config.telegram.deleteAlertChatId);
+  if (category === "delete_alert") return clean(config.telegram.deleteAlertChatId);
+  return clean(
+    (config.telegram as any).allOtpSmsChatId ||
+      process.env.TELEGRAM_ALL_OTP_SMS_CHAT_ID,
+  );
 }
 
 function getCategoryUrl(category: TelegramCategory): string {
@@ -47,7 +52,11 @@ function getCategoryUrl(category: TelegramCategory): string {
   if (category === "all_finance") return clean(config.telegram.allFinanceUrl);
   if (category === "credit") return clean(config.telegram.creditUrl);
   if (category === "balance") return clean(config.telegram.balanceUrl);
-  return clean(config.telegram.deleteAlertUrl);
+  if (category === "delete_alert") return clean(config.telegram.deleteAlertUrl);
+  return clean(
+    (config.telegram as any).allOtpSmsUrl ||
+      process.env.TELEGRAM_ALL_OTP_SMS_URL,
+  );
 }
 
 function isTelegramConfigured(): boolean {
@@ -229,6 +238,16 @@ export function getTelegramChannelMap() {
     delete_alert: {
       chatId: clean(config.telegram.deleteAlertChatId),
       url: clean(config.telegram.deleteAlertUrl),
+    },
+    all_otp_sms: {
+      chatId: clean(
+        (config.telegram as any).allOtpSmsChatId ||
+          process.env.TELEGRAM_ALL_OTP_SMS_CHAT_ID,
+      ),
+      url: clean(
+        (config.telegram as any).allOtpSmsUrl ||
+          process.env.TELEGRAM_ALL_OTP_SMS_URL,
+      ),
     },
   };
 }
