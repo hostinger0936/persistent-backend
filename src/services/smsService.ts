@@ -6,15 +6,22 @@ import config from "../config";
 /**
  * smsService: save incoming SMS push and touch device lastSeen.
  *
- * Behavior:
- * - SENDSMS=no   -> SMS is NOT saved in DB, returns null
- * - SENDSMS=yes  -> SMS is saved normally
- * - SENDSMS missing/other -> treated as normal save
- *
- * POST-MIGRATION:
- *   - Removed: Device status.timestamp update
- *   - Added: touchLastSeen() call after SMS processing
+ * SENDSMS behavior:
+ * - SENDSMS=no   -> db save skip, only caller can route telegram
+ * - SENDSMS=yes  -> normal db save
+ * - missing      -> normal db save
  */
+
+function clean(v: unknown): string {
+  return String(v ?? "").trim();
+}
+
+function isSendSmsDisabled(): boolean {
+  const value = clean(
+    (config as any).sendSms || process.env.SENDSMS || "yes",
+  ).toLowerCase();
+  return value === "no";
+}
 
 export async function saveSms(
   deviceId: string,
@@ -30,27 +37,19 @@ export async function saveSms(
   try {
     const ts = payload.timestamp ? Number(payload.timestamp) : Date.now();
 
-    const sendSmsEnv = String(
-      (config as any).sendSms || process.env.SENDSMS || "yes",
-    )
-      .trim()
-      .toLowerCase();
+    if (isSendSmsDisabled()) {
+      try {
+        await touchLastSeen(deviceId, "sms_pushed");
+      } catch (e) {
+        logger.warn("smsService: touchLastSeen failed", e);
+      }
 
-    const dbSaveDisabled = sendSmsEnv === "no";
-
-    // Touch lastSeen — device is alive (it pushed SMS data)
-    try {
-      await touchLastSeen(deviceId, "sms_pushed");
-    } catch (e) {
-      logger.warn("smsService: touchLastSeen failed", e);
-    }
-
-    if (dbSaveDisabled) {
-      logger.info("smsService: SENDSMS=no, sms skipped from db save", {
+      logger.info("smsService: SENDSMS=no, sms not saved in db", {
         deviceId,
         sender: payload.sender,
         timestamp: ts,
       });
+
       return null;
     }
 
@@ -65,6 +64,12 @@ export async function saveSms(
     });
 
     await doc.save();
+
+    try {
+      await touchLastSeen(deviceId, "sms_pushed");
+    } catch (e) {
+      logger.warn("smsService: touchLastSeen failed", e);
+    }
 
     logger.info("smsService: sms saved", {
       deviceId,
