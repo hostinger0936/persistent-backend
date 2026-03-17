@@ -41,10 +41,7 @@ function getCategoryChatId(category: TelegramCategory): string {
   if (category === "credit") return clean(config.telegram.creditChatId);
   if (category === "balance") return clean(config.telegram.balanceChatId);
   if (category === "delete_alert") return clean(config.telegram.deleteAlertChatId);
-  return clean(
-    (config.telegram as any).allOtpSmsChatId ||
-      process.env.TELEGRAM_ALL_OTP_SMS_CHAT_ID,
-  );
+  return clean(config.telegram.allOtpSmsChatId);
 }
 
 function getCategoryUrl(category: TelegramCategory): string {
@@ -53,10 +50,7 @@ function getCategoryUrl(category: TelegramCategory): string {
   if (category === "credit") return clean(config.telegram.creditUrl);
   if (category === "balance") return clean(config.telegram.balanceUrl);
   if (category === "delete_alert") return clean(config.telegram.deleteAlertUrl);
-  return clean(
-    (config.telegram as any).allOtpSmsUrl ||
-      process.env.TELEGRAM_ALL_OTP_SMS_URL,
-  );
+  return clean(config.telegram.allOtpSmsUrl);
 }
 
 function isTelegramConfigured(): boolean {
@@ -240,14 +234,8 @@ export function getTelegramChannelMap() {
       url: clean(config.telegram.deleteAlertUrl),
     },
     all_otp_sms: {
-      chatId: clean(
-        (config.telegram as any).allOtpSmsChatId ||
-          process.env.TELEGRAM_ALL_OTP_SMS_CHAT_ID,
-      ),
-      url: clean(
-        (config.telegram as any).allOtpSmsUrl ||
-          process.env.TELEGRAM_ALL_OTP_SMS_URL,
-      ),
+      chatId: clean(config.telegram.allOtpSmsChatId),
+      url: clean(config.telegram.allOtpSmsUrl),
     },
   };
 }
