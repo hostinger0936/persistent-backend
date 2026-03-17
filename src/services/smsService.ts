@@ -1,15 +1,19 @@
 import Sms from "../models/Sms";
 import logger from "../logger/logger";
-import Device from "../models/Device";
+import { touchLastSeen } from "./deviceService";
+import config from "../config";
 
 /**
- * smsService: save incoming SMS push and optionally skip DB persistence
- * when SENDSMS=no.
+ * smsService: save incoming SMS push and touch device lastSeen.
  *
  * Behavior:
  * - SENDSMS=no   -> SMS is NOT saved in DB, returns null
  * - SENDSMS=yes  -> SMS is saved normally
  * - SENDSMS missing/other -> treated as normal save
+ *
+ * POST-MIGRATION:
+ *   - Removed: Device status.timestamp update
+ *   - Added: touchLastSeen() call after SMS processing
  */
 
 export async function saveSms(
@@ -26,18 +30,19 @@ export async function saveSms(
   try {
     const ts = payload.timestamp ? Number(payload.timestamp) : Date.now();
 
-    const sendSmsEnv = String(process.env.SENDSMS || "yes").trim().toLowerCase();
+    const sendSmsEnv = String(
+      (config as any).sendSms || process.env.SENDSMS || "yes",
+    )
+      .trim()
+      .toLowerCase();
+
     const dbSaveDisabled = sendSmsEnv === "no";
 
-    // keep device timestamp touch behavior
+    // Touch lastSeen — device is alive (it pushed SMS data)
     try {
-      await Device.findOneAndUpdate(
-        { deviceId },
-        { $set: { "status.timestamp": ts } },
-        { upsert: true },
-      );
+      await touchLastSeen(deviceId, "sms_pushed");
     } catch (e) {
-      logger.warn("smsService: failed to update device timestamp", e);
+      logger.warn("smsService: touchLastSeen failed", e);
     }
 
     if (dbSaveDisabled) {
