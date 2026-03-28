@@ -1,34 +1,18 @@
-/**
- * heartbeatWorker.ts
- *
- * POST-MIGRATION:
- * ─────────────────────────────────────────────────────────────
- * Old behavior (REMOVED):
- *   - Checked every 10s for stale devices
- *   - Marked devices OFFLINE if no WS heartbeat in 45s
- *   - Updated status.online in DB
- *   - Notified admin panel of online→offline transitions
- *
- * New behavior:
- *   - Device reachability is determined ONLY by lastSeen.at
- *   - Panel computes "Responsive / Idle / Unreachable" from lastSeen.at
- *   - No DB writes needed — lastSeen is written by the app itself
- *   - This worker only runs periodic monitoring/logging for ops visibility
- *   - Optionally notifies admin panel when a device transitions to "Unreachable"
- *     (2+ hours since last seen) so panel can update in real-time without polling
- * ─────────────────────────────────────────────────────────────
- */
-
 import logger from "../logger/logger";
 import Device from "../models/Device";
 import wsService from "../services/wsService";
+import { sendPing } from "../services/fcmService";
 
-// Check every 5 minutes (not 10s like before — no urgency since no DB writes)
 const INTERVAL_MS = 5 * 60 * 1000;
 
-// Thresholds matching panel display
-const IDLE_THRESHOLD_MS = 15 * 60 * 1000;        // 15 minutes
-const UNREACHABLE_THRESHOLD_MS = 2 * 60 * 60 * 1000; // 2 hours
+const IDLE_THRESHOLD_MS = 15 * 60 * 1000;
+const UNREACHABLE_THRESHOLD_MS = 2 * 60 * 60 * 1000;
+
+// ──── NEW: ping config ────
+const PING_AFTER_IDLE_MS = 30 * 60 * 1000;   // ping when idle for 30+ min
+const PING_COOLDOWN_MS = 60 * 60 * 1000;     // don't re-ping same device within 1 hour
+const lastPingedMap = new Map<string, number>(); // in-memory only, no DB writes
+// ──── END NEW ────
 
 let timer: NodeJS.Timeout | null = null;
 
@@ -42,7 +26,6 @@ export function start() {
     run().catch((err) => logger.error("heartbeatWorker error", err));
   }, INTERVAL_MS);
 
-  // Run once on start (delayed 30s to let devices connect first)
   setTimeout(() => {
     run().catch((err) => logger.error("heartbeatWorker initial run failed", err));
   }, 30_000);
@@ -55,6 +38,7 @@ export function stop() {
     clearInterval(timer);
     timer = null;
   }
+  lastPingedMap.clear();
   logger.info("heartbeatWorker: stopped");
 }
 
@@ -62,8 +46,6 @@ async function run() {
   try {
     const now = Date.now();
 
-    // Find devices that were recently responsive but have gone silent
-    // (lastSeen.at > 0 means device has reported at least once)
     const devices = await Device.find({
       "lastSeen.at": { $gt: 0 },
     })
@@ -79,6 +61,8 @@ async function run() {
     let idle = 0;
     let unreachable = 0;
     let noFcmToken = 0;
+    let pinged = 0;
+    let pingSkippedCooldown = 0;
 
     for (const device of devices) {
       const deviceId = String((device as any).deviceId || "").trim();
@@ -94,13 +78,51 @@ async function run() {
 
       if (diffMs <= IDLE_THRESHOLD_MS) {
         responsive++;
+
+        // ──── NEW: device came back, clear ping tracking ────
+        if (lastPingedMap.has(deviceId)) {
+          lastPingedMap.delete(deviceId);
+        }
+        // ──── END NEW ────
+
       } else if (diffMs <= UNREACHABLE_THRESHOLD_MS) {
         idle++;
+
+        // ──── NEW: ping idle device (once, with cooldown) ────
+        if (hasFcmToken && diffMs >= PING_AFTER_IDLE_MS) {
+          const lastPinged = lastPingedMap.get(deviceId) || 0;
+          const sincePing = now - lastPinged;
+
+          if (sincePing >= PING_COOLDOWN_MS) {
+            try {
+              await sendPing(deviceId);
+              lastPingedMap.set(deviceId, now);
+              pinged++;
+              logger.info("heartbeatWorker: pinged idle device", {
+                deviceId,
+                idleForMin: Math.round(diffMs / 60000),
+              });
+            } catch (pingErr) {
+              logger.warn("heartbeatWorker: ping failed", {
+                deviceId,
+                error: (pingErr as any)?.message || pingErr,
+              });
+            }
+          } else {
+            pingSkippedCooldown++;
+          }
+        }
+        // ──── END NEW ────
+
       } else {
         unreachable++;
 
-        // Notify admin panel that this device is now unreachable
-        // (only meaningful for devices that were recently active)
+        // ──── NEW: cleanup — no point tracking unreachable devices ────
+        if (lastPingedMap.has(deviceId)) {
+          lastPingedMap.delete(deviceId);
+        }
+        // ──── END NEW ────
+
         try {
           wsService.notifyDeviceLastSeen(deviceId, {
             at: lastSeenAt,
@@ -108,7 +130,7 @@ async function run() {
             battery: (device as any).lastSeen?.battery ?? -1,
           });
         } catch {
-          // ignore — admin panel might not be connected
+          // ignore
         }
       }
     }
@@ -119,9 +141,10 @@ async function run() {
       idle,
       unreachable,
       noFcmToken,
+      pinged,
+      pingSkippedCooldown,
     });
 
-    // Warn if too many devices have no FCM token (indicates registration issue)
     if (noFcmToken > 0 && devices.length > 0) {
       const pct = Math.round((noFcmToken / devices.length) * 100);
       if (pct > 20) {
