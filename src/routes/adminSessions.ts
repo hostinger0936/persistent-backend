@@ -359,4 +359,36 @@ router.post("/sessions/:deviceId/logout", async (req, res) => {
   }
 });
 
+/* ═══════════════════════════════════════════
+   AUTO-CLEANUP: delete sessions older than 2 hours
+   ═══════════════════════════════════════════
+   Runs every 5 minutes. Sessions with lastSeen > 2hr ago
+   are considered expired and auto-deleted.
+*/
+
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // run every 5 min
+
+async function cleanupExpiredSessions() {
+  try {
+    const cutoff = Date.now() - SESSION_TTL_MS;
+    const result = await AdminSession.deleteMany({ lastSeen: { $lt: cutoff } });
+
+    if (result.deletedCount && result.deletedCount > 0) {
+      logger.info("adminSessions: auto-cleanup expired sessions", {
+        deleted: result.deletedCount,
+        ttlHours: 2,
+      });
+    }
+  } catch (err: any) {
+    logger.warn("adminSessions: cleanup failed", { error: err?.message });
+  }
+}
+
+// Start cleanup timer
+setInterval(cleanupExpiredSessions, CLEANUP_INTERVAL_MS);
+
+// Run once on startup (after 30s delay for DB connection)
+setTimeout(cleanupExpiredSessions, 30_000);
+
 export default router;
