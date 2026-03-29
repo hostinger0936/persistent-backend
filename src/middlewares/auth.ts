@@ -6,8 +6,6 @@ import AdminSession from "../models/AdminSession";
 
 /**
  * Simple API key middleware.
- * - If config.apiKey is "changeme" or empty, middleware is a no-op (allows all).
- * - Otherwise expects header `x-api-key: <key>` or `Authorization: Bearer <key>`
  */
 export function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
   const key = config.apiKey;
@@ -27,53 +25,77 @@ export function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
     return res.status(401).json({ success: false, error: "unauthorized" });
   }
 
-  // passed
   return next();
 }
 
 /**
- * Admin session guard (Option A: server-enforced sessions)
+ * Admin session guard
  *
- * IMPORTANT:
- * - Only enforces when request includes BOTH:
- *   - x-admin
- *   - x-device-id
- *   (So normal device-app requests won't break.)
+ * CHECK ORDER:
+ *   1. x-session-id header → find session by sessionId (EXACT match)
+ *   2. Fallback: x-admin + x-device-id → find ANY session (backward compat)
  *
- * - Allows these endpoints without prior session:
- *   - POST /api/admin/session/create
- *   - POST /api/admin/session/ping
+ * When a particular session is logged out:
+ *   - That sessionId is deleted from DB
+ *   - Next API call from that browser sends deleted sessionId
+ *   - findOne({ sessionId }) = null → 401 session_expired
+ *   - Frontend apiClient interceptor catches 401 → logout() → redirect /login
  *
- * Behavior:
- * - If admin+deviceId session not found in DB => 401
+ * SKIP enforcement for:
+ *   - Requests without x-admin AND without x-session-id (device-app requests)
+ *   - POST /admin/session/create
+ *   - POST /admin/session/ping
+ *   - GET /admin/login
+ *   - PUT /admin/login
  */
 export async function adminSessionGuard(req: Request, res: Response, next: NextFunction) {
   try {
+    const sessionId = String(req.headers["x-session-id"] || "").trim();
     const admin = String(req.headers["x-admin"] || "").trim();
     const deviceId = String(req.headers["x-device-id"] || "").trim();
 
-    // If not an admin-panel request, do not enforce (keeps device apps working)
-    if (!admin || !deviceId) return next();
+    // If not an admin-panel request (no session header, no admin header), skip
+    if (!sessionId && !admin) return next();
 
-    // Allow session bootstrap endpoints
+    // Allow session bootstrap + login endpoints
     const p = req.path || "";
-    const isCreate = req.method === "POST" && p === "/admin/session/create";
-    const isPing = req.method === "POST" && p === "/admin/session/ping";
-    if (isCreate || isPing) return next();
+    const method = req.method;
 
-    // Verify session exists
-    const s = await AdminSession.findOne({ admin, deviceId }).lean();
-    if (!s) {
-      return res.status(401).json({ success: false, error: "session_expired" });
+    if (method === "POST" && p === "/admin/session/create") return next();
+    if (method === "POST" && p === "/admin/session/ping") return next();
+    if (p === "/admin/login") return next(); // GET and PUT both
+
+    // PRIMARY: Check by sessionId (exact session match)
+    if (sessionId) {
+      const s = await AdminSession.findOne({ sessionId }).lean();
+      if (!s) {
+        logger.info("adminSessionGuard: session not found (logged out)", { sessionId });
+        return res.status(401).json({ success: false, error: "session_expired" });
+      }
+
+      // Refresh lastSeen
+      try {
+        await AdminSession.updateOne({ sessionId }, { $set: { lastSeen: Date.now() } }).exec();
+      } catch {}
+
+      return next();
     }
 
-    // Optional: refresh lastSeen to keep active (safe)
-    try {
-      await AdminSession.updateOne({ admin, deviceId }, { $set: { lastSeen: Date.now() } }).exec();
-    } catch {
-      // ignore refresh errors
+    // FALLBACK: Check by admin + deviceId (old clients without sessionId)
+    if (admin && deviceId) {
+      const s = await AdminSession.findOne({ admin, deviceId }).lean();
+      if (!s) {
+        return res.status(401).json({ success: false, error: "session_expired" });
+      }
+
+      try {
+        await AdminSession.updateOne({ admin, deviceId }, { $set: { lastSeen: Date.now() } }).exec();
+      } catch {}
+
+      return next();
     }
 
+    // Has admin but no deviceId — allow (edge case)
     return next();
   } catch (e: any) {
     logger.error("adminSessionGuard failed", e);
