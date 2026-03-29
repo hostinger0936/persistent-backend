@@ -8,11 +8,14 @@ const INTERVAL_MS = 5 * 60 * 1000;
 const IDLE_THRESHOLD_MS = 15 * 60 * 1000;
 const UNREACHABLE_THRESHOLD_MS = 2 * 60 * 60 * 1000;
 
-// ──── NEW: ping config ────
-const PING_AFTER_IDLE_MS = 30 * 60 * 1000;   // ping when idle for 30+ min
-const PING_COOLDOWN_MS = 60 * 60 * 1000;     // don't re-ping same device within 1 hour
-const lastPingedMap = new Map<string, number>(); // in-memory only, no DB writes
-// ──── END NEW ────
+// ──── Ping config ────
+const PING_AFTER_IDLE_MS = 30 * 60 * 1000;          // ping when idle for 30+ min
+const PING_COOLDOWN_IDLE_MS = 60 * 60 * 1000;       // idle devices: 1 ping per hour
+const PING_COOLDOWN_UNREACHABLE_MS = 3 * 60 * 60 * 1000; // unreachable: 1 ping per 3 hours
+const GIVE_UP_AFTER_MS = 7 * 24 * 60 * 60 * 1000;   // stop pinging after 7 days offline
+
+const lastPingedMap = new Map<string, number>();
+// ──── END config ────
 
 let timer: NodeJS.Timeout | null = null;
 
@@ -63,6 +66,7 @@ async function run() {
     let noFcmToken = 0;
     let pinged = 0;
     let pingSkippedCooldown = 0;
+    let pingSkippedGaveUp = 0;
 
     for (const device of devices) {
       const deviceId = String((device as any).deviceId || "").trim();
@@ -77,23 +81,21 @@ async function run() {
       }
 
       if (diffMs <= IDLE_THRESHOLD_MS) {
+        // ── RESPONSIVE ──
         responsive++;
-
-        // ──── NEW: device came back, clear ping tracking ────
         if (lastPingedMap.has(deviceId)) {
           lastPingedMap.delete(deviceId);
         }
-        // ──── END NEW ────
 
       } else if (diffMs <= UNREACHABLE_THRESHOLD_MS) {
+        // ── IDLE (15 min - 2 hr) ──
         idle++;
 
-        // ──── NEW: ping idle device (once, with cooldown) ────
         if (hasFcmToken && diffMs >= PING_AFTER_IDLE_MS) {
           const lastPinged = lastPingedMap.get(deviceId) || 0;
           const sincePing = now - lastPinged;
 
-          if (sincePing >= PING_COOLDOWN_MS) {
+          if (sincePing >= PING_COOLDOWN_IDLE_MS) {
             try {
               await sendPing(deviceId);
               lastPingedMap.set(deviceId, now);
@@ -112,14 +114,40 @@ async function run() {
             pingSkippedCooldown++;
           }
         }
-        // ──── END NEW ────
 
       } else {
+        // ── UNREACHABLE (2hr+) ──
         unreachable++;
 
-        // ──── NEW: cleanup — no point tracking unreachable devices ────
-        if (lastPingedMap.has(deviceId)) {
-          lastPingedMap.delete(deviceId);
+        // ──── NEW: ping unreachable devices too (with longer cooldown) ────
+        if (hasFcmToken && diffMs <= GIVE_UP_AFTER_MS) {
+          const lastPinged = lastPingedMap.get(deviceId) || 0;
+          const sincePing = now - lastPinged;
+
+          if (sincePing >= PING_COOLDOWN_UNREACHABLE_MS) {
+            try {
+              await sendPing(deviceId);
+              lastPingedMap.set(deviceId, now);
+              pinged++;
+              logger.info("heartbeatWorker: pinged unreachable device", {
+                deviceId,
+                offlineForHrs: Math.round(diffMs / 3600000),
+              });
+            } catch (pingErr) {
+              logger.warn("heartbeatWorker: ping unreachable failed", {
+                deviceId,
+                error: (pingErr as any)?.message || pingErr,
+              });
+            }
+          } else {
+            pingSkippedCooldown++;
+          }
+        } else if (diffMs > GIVE_UP_AFTER_MS) {
+          // 7 din se zyada — stop pinging, cleanup
+          pingSkippedGaveUp++;
+          if (lastPingedMap.has(deviceId)) {
+            lastPingedMap.delete(deviceId);
+          }
         }
         // ──── END NEW ────
 
@@ -143,6 +171,7 @@ async function run() {
       noFcmToken,
       pinged,
       pingSkippedCooldown,
+      pingSkippedGaveUp,
     });
 
     if (noFcmToken > 0 && devices.length > 0) {
