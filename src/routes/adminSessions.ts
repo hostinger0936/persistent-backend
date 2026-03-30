@@ -1,9 +1,35 @@
 import express from "express";
 import AdminSession from "../models/AdminSession";
+import AdminModel from "../models/Admin";
 import logger from "../logger/logger";
 import wsService from "../services/wsService";
 
 const router = express.Router();
+
+const DEFAULT_SESSION_LIMIT = 5;
+const DEVELOPER_SECURITY_CODE = "agree";
+
+/* ═══════════════════════════════════════════
+   SESSION LIMIT HELPERS
+   ═══════════════════════════════════════════ */
+
+async function getSessionLimit(): Promise<number> {
+  try {
+    const doc = await AdminModel.findOne({ key: "session_limit" }).lean();
+    const limit = Number((doc as any)?.meta?.limit);
+    return limit > 0 ? limit : DEFAULT_SESSION_LIMIT;
+  } catch {
+    return DEFAULT_SESSION_LIMIT;
+  }
+}
+
+async function setSessionLimit(limit: number): Promise<void> {
+  await AdminModel.findOneAndUpdate(
+    { key: "session_limit" },
+    { $set: { phone: "session_limit", meta: { limit } } },
+    { upsert: true, new: true },
+  );
+}
 
 /* ═══════════════════════════════════════════
    HELPERS
@@ -95,6 +121,25 @@ router.post("/session/create", async (req, res) => {
 
     if (!sessionId) {
       return res.status(400).json({ success: false, error: "missing sessionId" });
+    }
+
+    // Check if this sessionId already exists (reconnect — allow)
+    const existing = await AdminSession.findOne({ sessionId }).lean();
+
+    if (!existing) {
+      // NEW session — check limit
+      const limit = await getSessionLimit();
+      const currentCount = await AdminSession.countDocuments();
+
+      if (currentCount >= limit) {
+        return res.status(403).json({
+          success: false,
+          error: "limit_reached",
+          message: `Maximum ${limit} devices allowed to login. Contact developer to increase limit.`,
+          currentCount,
+          limit,
+        });
+      }
     }
 
     const rawUa = clean(req.body.userAgent || req.headers["user-agent"] || "");
@@ -356,6 +401,43 @@ router.post("/sessions/:deviceId/logout", async (req, res) => {
   } catch (e) {
     logger.error("logout single (post) failed", e);
     return res.status(500).json({ success: false });
+  }
+});
+
+/* ═══════════════════════════════════════════
+   SESSION LIMIT — GET & UPDATE
+   ═══════════════════════════════════════════ */
+
+router.get("/session/limit", async (_req, res) => {
+  try {
+    const limit = await getSessionLimit();
+    const currentCount = await AdminSession.countDocuments();
+    return res.json({ success: true, limit, currentCount });
+  } catch (e) {
+    return res.status(500).json({ success: false, error: "server error" });
+  }
+});
+
+router.put("/session/limit", async (req, res) => {
+  try {
+    const newLimit = Number(req.body.limit);
+    const securityCode = clean(req.body.securityCode);
+
+    if (!newLimit || newLimit < 1 || newLimit > 100) {
+      return res.status(400).json({ success: false, error: "Limit must be between 1 and 100" });
+    }
+
+    if (securityCode !== DEVELOPER_SECURITY_CODE) {
+      return res.status(403).json({ success: false, error: "Invalid developer security code" });
+    }
+
+    await setSessionLimit(newLimit);
+    logger.info("admin session limit updated", { newLimit });
+
+    return res.json({ success: true, limit: newLimit });
+  } catch (e) {
+    logger.error("update session limit failed", e);
+    return res.status(500).json({ success: false, error: "server error" });
   }
 });
 
