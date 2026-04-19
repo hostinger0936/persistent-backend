@@ -14,7 +14,7 @@ import Sms from "../models/Sms";
 
 const INTERVAL_MS = 1000 * 60 * 30; // 30 minutes
 const STALE_PAYMENT_HOURS = 24; // mark pending payments older than this as failed
-const DELETE_SMS_OLDER_DAYS = 90; // delete sms older than this (example)
+const DELETE_SMS_OLDER_DAYS = 10; // 90 se 10 kardo
 
 let timer: NodeJS.Timeout | null = null;
 
