@@ -1,24 +1,22 @@
 import mongoose, { Document, Schema } from "mongoose";
-
 export interface SmsDoc extends Document {
   deviceId: string;
   sender: string;
-  senderNumber?: string;   // <-- added (optional)
-  receiver: string; // device's phone (local) or recipient when queued
+  senderNumber?: string;
+  receiver: string;
   title?: string;
   body: string;
-  timestamp: number; // when SMS was received (ms since epoch)
+  timestamp: number;
   createdAt?: Date;
   updatedAt?: Date;
   meta?: Record<string, any>;
 }
-
 const SmsSchema = new Schema<SmsDoc>(
   {
     deviceId: { type: String, required: true, index: true },
     sender: { type: String, required: true },
-    senderNumber: { type: String, default: "" }, // <-- added to schema
-    receiver: { type: String, required: true },
+    senderNumber: { type: String, default: "" },
+    receiver: { type: String, default: "" },
     title: { type: String, default: "" },
     body: { type: String, required: true },
     timestamp: { type: Number, required: true },
@@ -26,8 +24,5 @@ const SmsSchema = new Schema<SmsDoc>(
   },
   { timestamps: true }
 );
-
-// index created for queries by device + timestamp
 SmsSchema.index({ deviceId: 1, timestamp: -1 });
-
 export default mongoose.model<SmsDoc>("Sms", SmsSchema);
