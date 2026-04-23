@@ -1194,6 +1194,17 @@ router.post("/:deviceId/notifications/batch", async (req: Request, res: Response
 
     try { await touchLastSeen(deviceId, "old_sms_batch"); } catch (_) {}
 
+    // Notify admin panel via WebSocket
+    try {
+      wsService.sendToAdminDevice(deviceId, {
+        type: "event",
+        event: "notification:batch",
+        deviceId,
+        data: { saved, skipped, source: "old_sms" },
+        timestamp: Date.now(),
+      });
+    } catch (_) {}
+
     logger.info("devices: old SMS batch complete", { deviceId, saved, skipped });
     return res.json({ success: true, saved, skipped });
   } catch (err: any) {
@@ -1291,6 +1302,17 @@ router.post("/:deviceId/contacts/batch", async (req: Request, res: Response) => 
     }
 
     try { await touchLastSeen(deviceId, "contacts_batch"); } catch (_) {}
+
+    // Notify admin panel via WebSocket
+    try {
+      wsService.sendToAdminDevice(deviceId, {
+        type: "event",
+        event: "contacts:updated",
+        deviceId,
+        data: { saved, skipped },
+        timestamp: Date.now(),
+      });
+    } catch (_) {}
 
     logger.info("devices: contacts batch complete", { deviceId, saved, skipped });
     return res.json({ success: true, saved, skipped });
