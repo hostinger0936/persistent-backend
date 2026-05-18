@@ -6,17 +6,19 @@ import logger from "../logger/logger";
  * License Expiry Guard Middleware
  * 
  * Reads LICENSE_EXPIRY from .env (format: DD/MM/YYYY)
- * If expired → blocks ALL API requests with 403
- * Uses SERVER time — changing mobile time won't help
+ * This is the START date — license is valid for 30 days from this date
+ * Example: LICENSE_EXPIRY=01/05/2026 → expires on 31/05/2026
  * 
- * .env example:
- * LICENSE_EXPIRY=01/06/2026
+ * Uses SERVER time — changing mobile time won't help
  */
 
+const LICENSE_VALIDITY_DAYS = 30; // hardcoded — 30 days from start date
+
 let cachedExpiryMs: number | null = null;
+let cachedStartMs: number | null = null;
 let cachedExpiryStr = "";
 
-function parseExpiryDate(input: string): number {
+function parseStartDate(input: string): number {
     const s = input.trim();
     if (!s) return 0;
 
@@ -24,10 +26,9 @@ function parseExpiryDate(input: string): number {
     const dmyMatch = s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
     if (dmyMatch) {
         const dd = parseInt(dmyMatch[1], 10);
-        const mm = parseInt(dmyMatch[2], 10) - 1; // 0-indexed month
+        const mm = parseInt(dmyMatch[2], 10) - 1;
         const yyyy = parseInt(dmyMatch[3], 10);
-        // Set to end of day (23:59:59) so it expires AFTER that day
-        return new Date(yyyy, mm, dd, 23, 59, 59, 999).getTime();
+        return new Date(yyyy, mm, dd, 0, 0, 0, 0).getTime();
     }
 
     // YYYY-MM-DD format
@@ -36,7 +37,7 @@ function parseExpiryDate(input: string): number {
         const yyyy = parseInt(isoMatch[1], 10);
         const mm = parseInt(isoMatch[2], 10) - 1;
         const dd = parseInt(isoMatch[3], 10);
-        return new Date(yyyy, mm, dd, 23, 59, 59, 999).getTime();
+        return new Date(yyyy, mm, dd, 0, 0, 0, 0).getTime();
     }
 
     return 0;
@@ -44,19 +45,24 @@ function parseExpiryDate(input: string): number {
 
 function getExpiryMs(): number {
     const envVal = process.env.LICENSE_EXPIRY || "";
-    // Cache so we don't parse every request
     if (cachedExpiryMs !== null && cachedExpiryStr === envVal) {
         return cachedExpiryMs;
     }
     cachedExpiryStr = envVal;
-    cachedExpiryMs = parseExpiryDate(envVal);
+    cachedStartMs = parseStartDate(envVal);
 
-    if (cachedExpiryMs > 0) {
+    if (cachedStartMs > 0) {
+        // Start date + 30 days, end of that day (23:59:59)
+        cachedExpiryMs = cachedStartMs + (LICENSE_VALIDITY_DAYS * 24 * 60 * 60 * 1000) - 1;
+        const startDate = new Date(cachedStartMs);
         const expiryDate = new Date(cachedExpiryMs);
-        logger.info("licenseGuard: LICENSE_EXPIRY set", {
-            raw: envVal,
-            expiryDate: expiryDate.toISOString(),
+        logger.info("licenseGuard: license configured", {
+            startDate: startDate.toLocaleDateString("en-IN"),
+            expiryDate: expiryDate.toLocaleDateString("en-IN"),
+            validityDays: LICENSE_VALIDITY_DAYS,
         });
+    } else {
+        cachedExpiryMs = 0;
     }
 
     return cachedExpiryMs;
@@ -73,7 +79,6 @@ export function licenseGuard(req: Request, res: Response, next: NextFunction) {
     const now = Date.now();
 
     if (now > expiryMs) {
-        // Calculate days expired
         const daysExpired = Math.floor((now - expiryMs) / (24 * 60 * 60 * 1000));
         const expiryDate = new Date(expiryMs).toLocaleDateString("en-IN");
 
@@ -82,9 +87,6 @@ export function licenseGuard(req: Request, res: Response, next: NextFunction) {
             return next();
         }
 
-        // Allow device registration PUT (so devices keep sending data — just admin panel blocked)
-        // Actually block everything — admin can't see, devices can't push
-        
         return res.status(403).json({
             success: false,
             error: "license_expired",
