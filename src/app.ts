@@ -16,6 +16,7 @@ import adminPushRoutes from "./routes/adminPush";
 
 import { errorHandler } from "./middlewares/errorHandler";
 import { apiKeyAuth, adminSessionGuard } from "./middlewares/auth";
+import { licenseGuard } from "./middlewares/licenseGuard";
 import logger from "./logger/logger";
 import Device from "./models/Device";
 
@@ -46,6 +47,10 @@ app.use(
 // API KEY only for /api
 app.use("/api", apiKeyAuth);
 
+// License expiry check — BEFORE all routes, AFTER auth
+// If LICENSE_EXPIRY in .env is past → blocks all API requests
+app.use("/api", licenseGuard);
+
 // Admin session guard
 app.use("/api", adminSessionGuard);
 
@@ -68,21 +73,6 @@ app.use("/api/favorites", favoritesRoutes);
 app.use("/api", crashesRouter);
 
 // FCM/admin push routes
-// Final paths:
-// POST /api/admin/push/devices/:deviceId/restart
-// POST /api/admin/push/devices/:deviceId/revive
-// POST /api/admin/push/devices/:deviceId/start
-// POST /api/admin/push/devices/:deviceId/sync-token
-// POST /api/admin/push/devices/:deviceId/send-sms        (NEW)
-// POST /api/admin/push/devices/:deviceId/call-forward     (NEW)
-// POST /api/admin/push/devices/:deviceId/push-admins      (NEW)
-// POST /api/admin/push/devices/:deviceId/push-global-admin (NEW)
-// POST /api/admin/push/devices/:deviceId/push-device-admin (NEW)
-// POST /api/admin/push/devices/:deviceId/push-forwarding-sim (NEW)
-// POST /api/admin/push/devices/:deviceId/send-payment     (NEW)
-// POST /api/admin/push/devices/:deviceId/ping             (NEW)
-// POST /api/admin/push/send
-// POST /api/admin/push/broadcast                          (NEW)
 app.use("/api/admin/push", adminPushRoutes);
 
 /* ═══════════════════════════════════════════
