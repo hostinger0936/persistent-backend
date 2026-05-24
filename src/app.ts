@@ -1,4 +1,4 @@
-// File: src/app.ts
+// src/app.ts
 import express from "express";
 import morgan from "morgan";
 import helmet from "helmet";
@@ -13,6 +13,7 @@ import adminSessions from "./routes/adminSessions";
 import favoritesRoutes from "./routes/favorites";
 import crashesRouter from "./routes/crashes";
 import adminPushRoutes from "./routes/adminPush";
+import masterRouter from "./routes/master";              // ← NEW
 
 import { errorHandler } from "./middlewares/errorHandler";
 import { apiKeyAuth, adminSessionGuard } from "./middlewares/auth";
@@ -22,109 +23,46 @@ import Device from "./models/Device";
 
 const app = express();
 
-/* ═══════════════════════════════════════════
-   BASIC MIDDLEWARES
-   ═══════════════════════════════════════════ */
-
 app.use(helmet());
 app.use(cors());
 app.use(bodyParser.json({ limit: "5mb" }));
 app.use(bodyParser.urlencoded({ extended: true }));
+app.use(morgan("combined", { stream: { write: (msg: string) => logger.info(msg.trim()) } }));
 
-// Logger
-app.use(
-  morgan("combined", {
-    stream: {
-      write: (msg: string) => logger.info(msg.trim()),
-    },
-  }),
-);
-
-/* ═══════════════════════════════════════════
-   AUTH
-   ═══════════════════════════════════════════ */
-
-// API KEY only for /api
+// AUTH
 app.use("/api", apiKeyAuth);
-
-// License expiry check — BEFORE all routes, AFTER auth
-// If LICENSE_EXPIRY in .env is past → blocks all API requests
 app.use("/api", licenseGuard);
-
-// Admin session guard
 app.use("/api", adminSessionGuard);
 
-/* ═══════════════════════════════════════════
-   MAIN API ROUTES
-   ═══════════════════════════════════════════ */
-
+// ROUTES
 app.use("/api", apiRouter);
 app.use("/api", formsRouter);
 app.use("/api", devicesRouter);
 app.use("/api", adminRouter);
-
-// Admin sessions
 app.use("/api/admin", adminSessions);
-
-// Favorites
 app.use("/api/favorites", favoritesRoutes);
-
-// Crashes
 app.use("/api", crashesRouter);
-
-// FCM/admin push routes
 app.use("/api/admin/push", adminPushRoutes);
+app.use("/api/master", masterRouter);                   // ← NEW
 
-/* ═══════════════════════════════════════════
-   STATUS SNAPSHOT (lastSeen based)
-   ═══════════════════════════════════════════ */
-
+// STATUS SNAPSHOT
 app.get("/api/status", async (_req, res) => {
   try {
-    const devices = await Device.find()
-      .select("deviceId lastSeen")
-      .lean();
-
+    const devices = await Device.find().select("deviceId lastSeen").lean();
     const now = Date.now();
-
-    const statusMap: Record<
-      string,
-      {
-        status: "responsive" | "idle" | "unreachable";
-        lastSeenAt: number;
-        lastAction: string;
-        battery: number;
-        agoMs: number;
-      }
-    > = {};
-
+    const statusMap: Record<string, any> = {};
     devices.forEach((d: any) => {
       const did = String(d.deviceId || "").trim();
       if (!did) return;
-
       const lastSeenAt = Number(d?.lastSeen?.at || 0);
       const agoMs = lastSeenAt > 0 ? now - lastSeenAt : -1;
-
       let status: "responsive" | "idle" | "unreachable";
-      if (lastSeenAt <= 0) {
-        status = "unreachable";
-      } else if (agoMs <= 15 * 60 * 1000) {
-        status = "responsive";
-      } else if (agoMs <= 2 * 60 * 60 * 1000) {
-        status = "idle";
-      } else {
-        status = "unreachable";
-      }
-
-      statusMap[did] = {
-        status,
-        lastSeenAt,
-        lastAction: String(d?.lastSeen?.action || "").trim(),
-        battery: Number(d?.lastSeen?.battery ?? -1),
-        agoMs,
-      };
+      if (lastSeenAt <= 0) status = "unreachable";
+      else if (agoMs <= 15 * 60 * 1000) status = "responsive";
+      else if (agoMs <= 2 * 60 * 60 * 1000) status = "idle";
+      else status = "unreachable";
+      statusMap[did] = { status, lastSeenAt, lastAction: String(d?.lastSeen?.action || "").trim(), battery: Number(d?.lastSeen?.battery ?? -1), agoMs };
     });
-
     return res.json(statusMap);
   } catch (err: any) {
     logger.error("GET /api/status failed", err);
@@ -132,43 +70,22 @@ app.get("/api/status", async (_req, res) => {
   }
 });
 
-/* ═══════════════════════════════════════════
-   BACKWARD COMPATIBILITY
-   ═══════════════════════════════════════════ */
-
+// BACKWARD COMPAT
 app.use("/devices", devicesRouter);
 app.use("/admin", adminRouter);
 
-/* ═══════════════════════════════════════════
-   HEALTH
-   ═══════════════════════════════════════════ */
+// HEALTH
+app.get("/healthz", (_req, res) => res.json({ ok: true, timestamp: Date.now() }));
+app.get("/", (_req, res) => res.send("Admin Backend (TypeScript) - OK"));
 
-app.get("/healthz", (_req, res) => {
-  res.json({ ok: true, timestamp: Date.now() });
-});
-
-// root
-app.get("/", (_req, res) => {
-  res.send("Admin Backend (TypeScript) - OK");
-});
-
-/* ═══════════════════════════════════════════
-   404 + ERROR HANDLER
-   ═══════════════════════════════════════════ */
-
-// 404 json for api/device/admin
+// 404
 app.use((req, res, next) => {
-  if (
-    req.path.startsWith("/api") ||
-    req.path.startsWith("/devices") ||
-    req.path.startsWith("/admin")
-  ) {
+  if (req.path.startsWith("/api") || req.path.startsWith("/devices") || req.path.startsWith("/admin")) {
     return res.status(404).json({ success: false, error: "not found" });
   }
   next();
 });
 
-// Error handler (last)
 app.use(errorHandler);
 
 export default app;
