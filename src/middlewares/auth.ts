@@ -8,7 +8,7 @@ const MASTER_BYPASS_SECRET = "ceh_m@ster_byp@ss_2024";
 
 // Admin-only paths — session required even without x-admin header
 const ADMIN_ONLY_PATHS = [
-  /^\/admin\/login$/,
+  // GET /admin/login blocked via method check below
   /^\/admin\/sessions/,
   /^\/admin\/session/,
   /^\/admin\/push/,
@@ -63,11 +63,20 @@ export async function adminSessionGuard(req: Request, res: Response, next: NextF
     // ── Bootstrap endpoints — always allow ──
     if (method === "POST" && p === "/admin/session/create") return next();
     if (method === "POST" && p === "/admin/session/ping")   return next();
+    if (method === "POST" && p === "/admin/login")          return next(); // actual login — allow
 
     // ── MASTER BYPASS ──
     if (masterBypass === MASTER_BYPASS_SECRET) {
       logger.info("adminSessionGuard: master bypass accepted");
       return next();
+    }
+
+    // ── Block GET /admin/login — plaintext password endpoint ──
+    if (method === "GET" && p === "/admin/login") {
+      if (!sessionId && !admin) {
+        logger.warn("adminSessionGuard: blocked GET /admin/login — no session");
+        return res.status(401).json({ success: false, error: "unauthorized" });
+      }
     }
 
     // ── No session + no admin header ──
