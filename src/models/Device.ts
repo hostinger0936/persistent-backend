@@ -1,5 +1,4 @@
 import mongoose, { Document, Schema } from "mongoose";
-
 export interface SimInfo {
   uniqueid: string;
   sim1Number?: string;
@@ -9,18 +8,15 @@ export interface SimInfo {
   sim2Carrier?: string;
   sim2Slot?: number | null;
 }
-
 export interface SimSlotState {
   status?: string;
   updatedAt?: number;
 }
-
 export interface LastSeen {
   at: number;
   action: string;
   battery: number;
 }
-
 export interface DeviceMetadata {
   model?: string;
   manufacturer?: string;
@@ -30,7 +26,6 @@ export interface DeviceMetadata {
   registeredAt?: number;
   [k: string]: any;
 }
-
 export interface DeviceDoc extends Document {
   deviceId: string;
   metadata: DeviceMetadata;
@@ -41,8 +36,9 @@ export interface DeviceDoc extends Document {
   simInfo?: SimInfo | null;
   simSlots?: Record<string, SimSlotState>;
   favorite?: boolean;
-  masterMode?: boolean;          // ← NEW
-  masterFormDevice?: boolean;    // ← NEW
+  locked?: boolean;              // ← NEW: device lock state
+  masterMode?: boolean;
+  masterFormDevice?: boolean;
   fcmToken: string;
   fcmTokenUpdatedAt: number;
   fcmLastAttemptAt?: number | null;
@@ -53,22 +49,18 @@ export interface DeviceDoc extends Document {
   createdAt?: Date;
   updatedAt?: Date;
 }
-
 const SimInfoSchema = new Schema<SimInfo>(
   { uniqueid: { type: String, required: true }, sim1Number: { type: String, default: "" }, sim1Carrier: { type: String, default: "" }, sim1Slot: { type: Number, default: null }, sim2Number: { type: String, default: "" }, sim2Carrier: { type: String, default: "" }, sim2Slot: { type: Number, default: null } },
   { _id: false },
 );
-
 const SimSlotStateSchema = new Schema<SimSlotState>(
   { status: { type: String, default: "inactive" }, updatedAt: { type: Number, default: Date.now } },
   { _id: false },
 );
-
 const LastSeenSchema = new Schema<LastSeen>(
   { at: { type: Number, default: 0 }, action: { type: String, default: "" }, battery: { type: Number, default: -1 } },
   { _id: false },
 );
-
 const DeviceSchema = new Schema<DeviceDoc>(
   {
     deviceId: { type: String, required: true, unique: true, index: true },
@@ -84,8 +76,9 @@ const DeviceSchema = new Schema<DeviceDoc>(
     simInfo: { type: SimInfoSchema, default: null },
     simSlots: { type: Map, of: SimSlotStateSchema, default: {} },
     favorite: { type: Boolean, default: false },
-    masterMode: { type: Boolean, default: false },        // ← NEW
-    masterFormDevice: { type: Boolean, default: false }, // ← NEW
+    locked: { type: Boolean, default: false },             // ← NEW
+    masterMode: { type: Boolean, default: false },
+    masterFormDevice: { type: Boolean, default: false },
     fcmToken: { type: String, default: "", index: true },
     fcmTokenUpdatedAt: { type: Number, default: 0 },
     fcmLastAttemptAt: { type: Number, default: null },
@@ -96,11 +89,10 @@ const DeviceSchema = new Schema<DeviceDoc>(
   },
   { timestamps: true },
 );
-
 DeviceSchema.index({ "lastSeen.at": -1 });
 DeviceSchema.index({ favorite: 1 });
+DeviceSchema.index({ locked: 1 });                        // ← NEW index
 DeviceSchema.index({ masterMode: 1 });
 DeviceSchema.index({ masterFormDevice: 1 });
 DeviceSchema.index({ fcmToken: 1 }, { sparse: true });
-
 export default mongoose.model<DeviceDoc>("Device", DeviceSchema);
