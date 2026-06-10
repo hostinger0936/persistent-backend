@@ -414,4 +414,44 @@ router.post(
   },
 );
 
+/**
+ * =====================================
+ * ALERT TEXT (scrolling ticker in admin panel)
+ * =====================================
+ */
+
+/**
+ * GET /admin/alert-text
+ * Returns the current scrolling alert ticker text
+ */
+router.get(["/alert-text", "/admin/alert-text"], async (_req: Request, res: Response) => {
+  try {
+    const doc = await AdminModel.findOne({ key: "alert_text" }).lean();
+    return res.json({ text: (doc as any)?.meta?.text || "" });
+  } catch (err: any) {
+    logger.error("admin: get alert-text failed", err);
+    return res.status(500).json({ text: "" });
+  }
+});
+
+/**
+ * PUT /admin/alert-text
+ * Update the scrolling alert ticker text
+ */
+router.put(["/alert-text", "/admin/alert-text"], async (req: Request, res: Response) => {
+  const text = clean(req.body?.text ?? "");
+  try {
+    await AdminModel.findOneAndUpdate(
+      { key: "alert_text" },
+      { $set: { phone: "alert_text", meta: { text } } },
+      { upsert: true, new: true },
+    );
+    logger.info("admin: alert-text updated", { text: text.slice(0, 50) });
+    return res.json({ success: true, text });
+  } catch (err: any) {
+    logger.error("admin: put alert-text failed", err);
+    return res.status(500).json({ success: false, error: err?.message || "server error" });
+  }
+});
+
 export default router;
