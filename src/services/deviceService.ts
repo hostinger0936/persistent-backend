@@ -318,6 +318,7 @@ export async function updateFcmSendMeta(
 /**
  * Clear invalid FCM token from device.
  * Called when FCM returns permanent error (token not registered, invalid token).
+ * Also emits device:uninstalled WS event so admin panel knows app was uninstalled.
  */
 export async function clearInvalidFcmToken(
   deviceId: string,
@@ -336,6 +337,19 @@ export async function clearInvalidFcmToken(
     ).exec();
 
     logger.warn("deviceService: cleared invalid FCM token", { deviceId, reason });
+
+    // Emit device:uninstalled WS event → admin panel shows "App Uninstalled ⚠️"
+    try {
+      const wsService = require("./wsService").default;
+      wsService.broadcastAdminEvent("device:uninstalled", {
+        deviceId,
+        reason: reason || "invalid_token",
+        timestamp: Date.now(),
+      }, { deviceId, includeDeviceChannel: true });
+      logger.info("deviceService: device:uninstalled emitted", { deviceId });
+    } catch (_) {
+      // ignore ws errors — DB update already succeeded
+    }
   } catch (err: any) {
     logger.warn("deviceService: clearInvalidFcmToken failed", {
       deviceId,
