@@ -105,34 +105,24 @@ export async function sendToDevice(
 ): Promise<{ success: boolean; messageId?: string; error?: string }> {
   const token = await getDeviceFcmToken(deviceId);
 
+  // Uninstalled device — permanent marker check
+  if (token === "__UNINSTALLED__") {
+    logger.info(`${TAG}: device is uninstalled (marker found)`, { deviceId });
+    try {
+      const wsService = require("./wsService").default;
+      wsService.broadcastAdminEvent("device:uninstalled", {
+        deviceId,
+        reason: "app_uninstalled",
+        timestamp: Date.now(),
+      }, { deviceId, includeDeviceChannel: true });
+    } catch (_) {}
+    await updateFcmSendMeta(deviceId, { lastAttemptAt: Date.now() });
+    return { success: false, error: "uninstalled" };
+  }
+
+  // No token — naya device, abhi sync nahi hua
   if (!token) {
     logger.warn(`${TAG}: sendToDevice skipped, token missing`, { deviceId });
-
-    try {
-      const DeviceModel = (await import("../models/Device")).default;
-      const doc = await DeviceModel.findOne({ deviceId }).select("fcmLastError").lean();
-      const lastErr = String((doc as any)?.fcmLastError || "");
-      const wasUninstalled =
-        lastErr.includes("registration-token-not-registered") ||
-        lastErr.includes("invalid-registration-token");
-
-      if (wasUninstalled) {
-        logger.info(`${TAG}: re-emitting device:uninstalled`, { deviceId });
-        const wsService = require("./wsService").default;
-        wsService.broadcastAdminEvent("device:uninstalled", {
-          deviceId,
-          reason: lastErr,
-          timestamp: Date.now(),
-        }, { deviceId, includeDeviceChannel: true });
-
-        // CRITICAL: fcmLastError overwrite mat karo — permanent error preserve karo
-        // Sirf lastAttemptAt update karo
-        await updateFcmSendMeta(deviceId, { lastAttemptAt: Date.now() });
-        return { success: false, error: "uninstalled" };
-      }
-    } catch (_) {}
-
-    // Naya device — token abhi sync nahi hua
     await updateFcmSendMeta(deviceId, {
       lastAttemptAt: Date.now(),
       lastError: "missing_token",
