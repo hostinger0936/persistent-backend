@@ -107,14 +107,34 @@ export async function sendToDevice(
 
   if (!token) {
     logger.warn(`${TAG}: sendToDevice skipped, token missing`, { deviceId });
+
+    // Check DB: kya pehle FCM ne confirm kiya tha ki app uninstalled hai?
+    // fcmLastError mein "not-registered" ya "invalid-registration" hoga
+    try {
+      const DeviceModel = (await import("../models/Device")).default;
+      const doc = await DeviceModel.findOne({ deviceId }).select("fcmLastError").lean();
+      const lastErr = String((doc as any)?.fcmLastError || "");
+      const wasUninstalled =
+        lastErr.includes("registration-token-not-registered") ||
+        lastErr.includes("invalid-registration-token");
+
+      if (wasUninstalled) {
+        // App pehle uninstall ho chuka hai — dobara emit karo
+        logger.info(`${TAG}: re-emitting device:uninstalled (token already cleared)`, { deviceId });
+        const wsService = require("./wsService").default;
+        wsService.broadcastAdminEvent("device:uninstalled", {
+          deviceId,
+          reason: lastErr,
+          timestamp: Date.now(),
+        }, { deviceId, includeDeviceChannel: true });
+      }
+    } catch (_) {}
+
     await updateFcmSendMeta(deviceId, {
       lastAttemptAt: Date.now(),
       lastError: "missing_token",
       lastErrorAt: Date.now(),
     });
-    // missing_token = naya device (token abhi sync nahi hua) YA uninstalled
-    // clearInvalidFcmToken NAHI karenge — naye device ka token overwrite ho jayega
-    // adminPush.ts mein check_online:result WS event bheja jayega
     return { success: false, error: "missing_token" };
   }
 
