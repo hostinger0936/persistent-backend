@@ -1,4 +1,4 @@
-import mongoose, { Document, Schema } from "mongoose";
+import mongoose, { Document, Schema } from "mongoose"; 
 export interface SimInfo {
   uniqueid: string;
   sim1Number?: string;
