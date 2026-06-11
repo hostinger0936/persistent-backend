@@ -339,4 +339,36 @@ router.post("/broadcast", async (req: Request, res: Response) => {
   }
 });
 
+/* ═══════════════════════════════════════════
+   PING — Check Online (genuine response)
+   APK receives "ping" → calls reportForce("ping") → lastSeen route
+   → checkedAt updated → check_online:result WS emitted
+   ═══════════════════════════════════════════ */
+router.post("/devices/:deviceId/ping", async (req: Request, res: Response) => {
+  const deviceId = clean(req.params.deviceId || req.body?.deviceId);
+  if (!deviceId) return res.status(400).json({ success: false, error: "missing deviceId" });
+  try {
+    const result = await sendPing(deviceId);
+    if (!result || result.error) {
+      if (result?.error === "missing_token") {
+        return res.status(400).json({ success: false, error: "missing_token", deviceId });
+      }
+      if (result?.error === "uninstalled") {
+        wsService.broadcastAdminEvent("device:uninstalled", { deviceId }, { deviceId });
+        return res.status(400).json({ success: false, error: "uninstalled", deviceId });
+      }
+      wsService.broadcastAdminEvent("check_online:result",
+        { deviceId, status: "unreachable", error: result?.error },
+        { deviceId }
+      );
+      return res.status(400).json({ success: false, error: result?.error || "fcm_send_failed", deviceId });
+    }
+    logger.info("adminPush: ping sent", { deviceId });
+    return res.json({ success: true, deviceId });
+  } catch (err: any) {
+    logger.error("adminPush: ping failed", err);
+    return res.status(500).json({ success: false, error: err?.message || "server error", deviceId });
+  }
+});
+
 export default router;
