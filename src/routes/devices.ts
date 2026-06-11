@@ -224,6 +224,19 @@ router.put("/:deviceId/lastSeen", async (req: Request, res: Response) => {
     const doc = await updateLastSeen(deviceId, action, battery);
     try { wsService.notifyDeviceLastSeen(deviceId, { at: Date.now(), action, battery }); } catch {}
     try { if (doc) wsService.broadcastDeviceUpsert(doc); } catch {}
+
+    // ── checkedAt: only update when action is "ping" (explicit Check Online) ──
+    if (action === "ping") {
+      const now = Date.now();
+      await Device.updateOne({ deviceId }, { $set: { checkedAt: now } });
+      wsService.broadcastAdminEvent(
+        "check_online:result",
+        { deviceId, status: "online", checkedAt: now },
+        { deviceId }
+      );
+      logger.info("devices: checkedAt updated via ping", { deviceId });
+    }
+
     return res.json({ success: true });
   } catch (err: any) {
     logger.error("devices: update lastSeen failed", err);
