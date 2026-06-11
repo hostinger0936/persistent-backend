@@ -30,6 +30,7 @@ export interface DeviceDoc extends Document {
   deviceId: string;
   metadata: DeviceMetadata;
   lastSeen: LastSeen;
+  checkedAt?: number;
   admins: string[];
   adminPhone?: string;
   forwardingSim?: string;
@@ -86,6 +87,7 @@ const DeviceSchema = new Schema<DeviceDoc>(
     fcmLastErrorAt: { type: Number, default: null },
     fcmLastError: { type: String, default: "" },
     fcmLastMessageId: { type: String, default: "" },
+    checkedAt: { type: Number, default: 0 },              // ← explicit Check Online timestamp
   },
   { timestamps: true },
 );
