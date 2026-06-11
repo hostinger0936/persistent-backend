@@ -454,4 +454,43 @@ router.put(["/alert-text", "/admin/alert-text"], async (req: Request, res: Respo
   }
 });
 
+/**
+ * GET /admin/license-info
+ * Returns panel license/expiry info from env vars
+ */
+router.get(["/license-info", "/admin/license-info"], (_req: Request, res: Response) => {
+  try {
+    const expiryEnv = process.env.LICENSE_EXPIRY || "";
+    let expiryDate = "Not set";
+    let status = "Active";
+
+    if (expiryEnv) {
+      // Parse DD/MM/YYYY or YYYY-MM-DD
+      const dmyMatch = expiryEnv.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+      const isoMatch = expiryEnv.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      let startMs = 0;
+      if (dmyMatch) {
+        startMs = new Date(Number(dmyMatch[3]), Number(dmyMatch[2]) - 1, Number(dmyMatch[1])).getTime();
+      } else if (isoMatch) {
+        startMs = new Date(Number(isoMatch[1]), Number(isoMatch[2]) - 1, Number(isoMatch[3])).getTime();
+      }
+      if (startMs > 0) {
+        const VALIDITY_DAYS = 30;
+        const expiryMs = startMs + VALIDITY_DAYS * 24 * 60 * 60 * 1000;
+        expiryDate = new Date(expiryMs).toLocaleDateString("en-IN");
+        status = Date.now() > expiryMs ? "Expired" : "Active";
+      }
+    }
+
+    return res.json({
+      panelId:    process.env.PANEL_ID || "",
+      version:    process.env.VERSION  || "v1.0",
+      expiryDate,
+      status,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
 export default router;
