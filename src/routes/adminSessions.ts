@@ -126,21 +126,8 @@ router.post("/session/create", async (req, res) => {
     // Check if this sessionId already exists (reconnect — allow)
     const existing = await AdminSession.findOne({ sessionId }).lean();
 
-    if (!existing) {
-      // NEW session — check limit
-      const limit = await getSessionLimit();
-      const currentCount = await AdminSession.countDocuments();
-
-      if (currentCount >= limit) {
-        return res.status(403).json({
-          success: false,
-          error: "limit_reached",
-          message: `Maximum ${limit} devices allowed to login. Contact developer to increase limit.`,
-          currentCount,
-          limit,
-        });
-      }
-    }
+    // No session limit — unlimited logins allowed
+    // (limit_reached removed)
 
     const rawUa = clean(req.body.userAgent || req.headers["user-agent"] || "");
     const ip = getClientIp(req);
