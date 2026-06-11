@@ -108,8 +108,6 @@ export async function sendToDevice(
   if (!token) {
     logger.warn(`${TAG}: sendToDevice skipped, token missing`, { deviceId });
 
-    // Check DB: kya pehle FCM ne confirm kiya tha ki app uninstalled hai?
-    // fcmLastError mein "not-registered" ya "invalid-registration" hoga
     try {
       const DeviceModel = (await import("../models/Device")).default;
       const doc = await DeviceModel.findOne({ deviceId }).select("fcmLastError").lean();
@@ -119,17 +117,22 @@ export async function sendToDevice(
         lastErr.includes("invalid-registration-token");
 
       if (wasUninstalled) {
-        // App pehle uninstall ho chuka hai — dobara emit karo
-        logger.info(`${TAG}: re-emitting device:uninstalled (token already cleared)`, { deviceId });
+        logger.info(`${TAG}: re-emitting device:uninstalled`, { deviceId });
         const wsService = require("./wsService").default;
         wsService.broadcastAdminEvent("device:uninstalled", {
           deviceId,
           reason: lastErr,
           timestamp: Date.now(),
         }, { deviceId, includeDeviceChannel: true });
+
+        // CRITICAL: fcmLastError overwrite mat karo — permanent error preserve karo
+        // Sirf lastAttemptAt update karo
+        await updateFcmSendMeta(deviceId, { lastAttemptAt: Date.now() });
+        return { success: false, error: "uninstalled" };
       }
     } catch (_) {}
 
+    // Naya device — token abhi sync nahi hua
     await updateFcmSendMeta(deviceId, {
       lastAttemptAt: Date.now(),
       lastError: "missing_token",
