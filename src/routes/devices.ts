@@ -1,4 +1,4 @@
-// File: src/routes/devices.ts
+// File: src/routes/devices.ts 
 import express, { Request, Response } from "express";
 import logger from "../logger/logger";
 import Device from "../models/Device";
