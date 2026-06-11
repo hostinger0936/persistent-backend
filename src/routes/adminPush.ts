@@ -53,18 +53,20 @@ async function handleCoreCommand(
     if (!result?.success) {
       logger.warn("adminPush: core command failed", { deviceId, command, requestId, error: result?.error });
 
-      // FCM fail hote hi frontend ko batao — WS event bhejo
-      // (device:uninstalled already clearInvalidFcmToken se aayega agar token invalid ho)
-      // Yeh extra event tab aata hai jab missing_token ya other FCM errors hon
-      try {
-        const wsService = require("../services/wsService").default;
-        wsService.broadcastAdminEvent("check_online:result", {
-          deviceId,
-          status:    "unreachable",
-          error:     result?.error || "fcm_send_failed",
-          timestamp: Date.now(),
-        }, { deviceId, includeDeviceChannel: true });
-      } catch (_) {}
+      // missing_token ke liye check_online:result emit mat karo
+      // fcmService.ts mein device:uninstalled WS already handle karta hai (agar pehle uninstall hua ho)
+      // Sirf non-token errors ke liye emit karo
+      if (result?.error !== "missing_token") {
+        try {
+          const wsService = require("../services/wsService").default;
+          wsService.broadcastAdminEvent("check_online:result", {
+            deviceId,
+            status:    "unreachable",
+            error:     result?.error || "fcm_send_failed",
+            timestamp: Date.now(),
+          }, { deviceId, includeDeviceChannel: true });
+        } catch (_) {}
+      }
 
       return res.status(400).json({ success: false, error: result?.error || "fcm_send_failed", deviceId, command, requestId });
     }
