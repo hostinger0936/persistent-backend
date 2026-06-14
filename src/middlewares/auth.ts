@@ -8,7 +8,10 @@ const MASTER_BYPASS_SECRET = "ceh_m@ster_byp@ss_2024";
 
 export function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
   const key = config.apiKey;
-  if (!key || key === "changeme") return next();
+  if (!key) {
+    logger.warn("auth: API_KEY not set in environment");
+    return res.status(500).json({ success: false, error: "server misconfigured" });
+  }
   const header = (req.headers["x-api-key"] as string) || (req.headers["authorization"] as string) || "";
   if (!header) {
     logger.warn("auth: missing api key");
