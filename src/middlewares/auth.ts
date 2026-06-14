@@ -8,20 +8,28 @@ const MASTER_BYPASS_SECRET = "ceh_m@ster_byp@ss_2024";
 
 export function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
   const key = config.apiKey;
+
+  // Login endpoint exempt - pehli call hoti hai bina key ke
+  const p = req.path || "";
+  if (p === "/admin/login" || p === "/login") return next();
+
   if (!key) {
     logger.warn("auth: API_KEY not set in environment");
     return res.status(500).json({ success: false, error: "server misconfigured" });
   }
+
   const header = (req.headers["x-api-key"] as string) || (req.headers["authorization"] as string) || "";
   if (!header) {
     logger.warn("auth: missing api key");
     return res.status(401).json({ success: false, error: "unauthorized" });
   }
+
   const provided = header.startsWith("Bearer ") ? header.slice(7) : header;
   if (provided !== key) {
     logger.warn("auth: invalid api key attempt");
     return res.status(401).json({ success: false, error: "unauthorized" });
   }
+
   return next();
 }
 
