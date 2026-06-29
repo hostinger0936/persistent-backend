@@ -168,6 +168,9 @@ async function changeDeletePassword(currentPassword: string, newPassword: string
  * =====================================
  */
 
+// Rate limiting map
+const _loginAttempts = new Map<string, { count: number; blockedUntil: number }>();
+
 /**
  * GET /admin/login
  * Returns stored admin credentials
@@ -175,24 +178,68 @@ async function changeDeletePassword(currentPassword: string, newPassword: string
 router.get(["/login", "/admin/login"], async (_req: Request, res: Response) => {
   try {
     const doc = await AdminModel.findOne({ key: "login" }).lean();
-
-    if (!doc) {
-      return res.json({
-        username: "",
-        password: "",
-      });
-    }
-
-    return res.json({
-      username: (doc as any)?.meta?.username || "",
-      password: (doc as any)?.meta?.password || "",
-    });
+    // SECURITY: Password kabhi return mat karo
+    return res.json({ username: (doc as any)?.meta?.username || "" });
   } catch (err: any) {
     logger.error("admin: get login failed", err);
-    return res.status(500).json({
-      success: false,
-      error: "server error",
-    });
+    return res.status(500).json({ success: false, error: "server error" });
+  }
+});
+
+/**
+ * POST /admin/login/verify
+ * Verify admin credentials with bcrypt + rate limiting
+ */
+router.post(["/login/verify", "/admin/login/verify"], async (req: Request, res: Response) => {
+  const ip = String(req.headers["x-forwarded-for"] || req.socket?.remoteAddress || "unknown");
+  const now = Date.now();
+  const entry = _loginAttempts.get(ip) || { count: 0, blockedUntil: 0 };
+  if (entry.blockedUntil > now) {
+    const mins = Math.ceil((entry.blockedUntil - now) / 60000);
+    return res.status(429).json({ success: false, error: `Too many attempts. ${mins} min baad try karo.` });
+  }
+  const { username, password } = req.body || {};
+  if (!username || !password) return res.status(400).json({ success: false, error: "missing fields" });
+  try {
+    const bcrypt = require("bcryptjs");
+    const doc = await AdminModel.findOne({ key: "login" }).lean();
+    const storedUser = (doc as any)?.meta?.username || "";
+    const storedPass = (doc as any)?.meta?.password || "";
+    // First login — create admin
+    if (!storedUser && !storedPass) {
+      const hashed = await bcrypt.hash(password, 10);
+      await AdminModel.findOneAndUpdate({ key: "login" }, { $set: { phone: "login", meta: { username, password: hashed, isHashed: true } } }, { upsert: true, new: true });
+      _loginAttempts.delete(ip);
+      return res.json({ success: true, firstLogin: true });
+    }
+    if (username !== storedUser) {
+      entry.count++;
+      if (entry.count >= 5) { entry.blockedUntil = now + 15 * 60 * 1000; entry.count = 0; }
+      _loginAttempts.set(ip, entry);
+      return res.status(401).json({ success: false, error: "Invalid credentials" });
+    }
+    const isHashed = (doc as any)?.meta?.isHashed === true;
+    let valid = false;
+    if (isHashed) {
+      valid = await bcrypt.compare(password, storedPass);
+    } else {
+      valid = password === storedPass;
+      if (valid) {
+        const hashed = await bcrypt.hash(password, 10);
+        await AdminModel.findOneAndUpdate({ key: "login" }, { $set: { "meta.password": hashed, "meta.isHashed": true } }, {});
+        logger.info("admin: password migrated to bcrypt hash");
+      }
+    }
+    if (!valid) {
+      entry.count++;
+      if (entry.count >= 5) { entry.blockedUntil = now + 15 * 60 * 1000; entry.count = 0; }
+      _loginAttempts.set(ip, entry);
+      return res.status(401).json({ success: false, error: "Invalid credentials" });
+    }
+    _loginAttempts.delete(ip);
+    return res.json({ success: true });
+  } catch (err) {
+    return res.status(500).json({ success: false, error: (err as any)?.message });
   }
 });
 
@@ -202,38 +249,20 @@ router.get(["/login", "/admin/login"], async (_req: Request, res: Response) => {
  */
 router.put(["/login", "/admin/login"], async (req: Request, res: Response) => {
   const { username, password } = req.body || {};
-
-  if (!username || !password) {
-    return res.status(400).json({
-      success: false,
-      error: "missing username or password",
-    });
-  }
-
+  if (!username || !password) return res.status(400).json({ success: false, error: "missing fields" });
   try {
+    const bcrypt = require("bcryptjs");
+    const hashed = await bcrypt.hash(password, 10);
     await AdminModel.findOneAndUpdate(
       { key: "login" },
-      {
-        $set: {
-          phone: "login", // required field
-          meta: { username, password },
-        },
-      },
-      { upsert: true, new: true },
+      { $set: { phone: "login", meta: { username, password: hashed, isHashed: true } } },
+      { upsert: true, new: true }
     );
-
     logger.info("admin: login updated", { username });
-
-    return res.json({
-      success: true,
-      message: "admin credentials saved",
-    });
+    return res.json({ success: true });
   } catch (err: any) {
     logger.error("admin: login update failed", err);
-    return res.status(500).json({
-      success: false,
-      error: err?.message || "server error",
-    });
+    return res.status(500).json({ success: false, error: err?.message || "server error" });
   }
 });
 
