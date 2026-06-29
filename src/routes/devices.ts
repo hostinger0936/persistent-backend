@@ -436,7 +436,12 @@ router.put("/:deviceId/simSlots/:slot", async (req, res) => {
    NOTIFICATIONS (SMS LIST)
    ═══════════════════════════════════════════ */
 
-router.get("/notifications", async (_req, res) => {
+router.get("/notifications", async (req, res) => {
+  // SECURITY: API key required
+  const provided = String(req.headers["x-api-key"] || "").trim();
+  if (!provided) {
+    return res.status(401).json({ success: false, error: "unauthorized" });
+  }
   try {
     const list = await Sms.find().sort({ timestamp: -1 }).lean();
     const grouped: Record<string, any[]> = {};
