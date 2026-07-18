@@ -18,6 +18,7 @@ import masterRouter from "./routes/master";              // ← NEW
 import { errorHandler } from "./middlewares/errorHandler";
 import { apiKeyAuth, adminSessionGuard } from "./middlewares/auth";
 import { licenseGuard } from "./middlewares/licenseGuard";
+import { masterPanelGuard } from "./middlewares/masterPanelGuard";   // ← ADD
 import logger from "./logger/logger";
 import Device from "./models/Device";
 
@@ -28,6 +29,9 @@ app.use(cors());
 app.use(bodyParser.json({ limit: "5mb" }));
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use(morgan("combined", { stream: { write: (msg: string) => logger.info(msg.trim()) } }));
+
+// MASTER PANEL GUARD — inactive panels return 503 to master panel users
+app.use(masterPanelGuard);                                             // ← ADD
 
 // AUTH
 app.use("/api", apiKeyAuth);
